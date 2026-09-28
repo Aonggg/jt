@@ -15,14 +15,18 @@ Set `JT_VAULT_DIR` to the checked-out private vault and `JT_KEY_FILE` to a `0600
 ## Use
 
 ```sh
-jt add mom/OPENAI_API_KEY
+jt add myapp/OPENAI_API_KEY
 jt ls
 jt ls --json            # id, ref, name, preview, timestamps; never ciphertext
 jt status               # local vault state: uncommitted changes / commits not pushed
 jt resolve jt://secret/<id> --exec env VAR_NAME
-jt env mom -- your-command
+jt env myapp -- your-command
 ```
 
 `jt env <namespace> -- command` decrypts the namespace entries inside `jt` and injects them only into the child process. Secret values are not printed by `jt` and are not passed through the calling agent's context. Use `jt sync` after changing the vault to pull or push encrypted records.
 
 See `jt help` for the complete command list.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
