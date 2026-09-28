@@ -39,7 +39,7 @@ func setup(t *testing.T, secrets []entry) (string, *bytes.Buffer) {
 
 func TestListJSON(t *testing.T) {
 	_, out := setup(t, []entry{
-		{ID: "BBBBBBBB", Name: "mom/OPENAI_API_KEY", Ciphertext: "secret-bytes", Preview: "sk****3fA2", CreatedAt: "2026-09-22T05:43:04Z", UpdatedAt: "2026-09-23T05:43:04Z"},
+		{ID: "BBBBBBBB", Name: "myapp/OPENAI_API_KEY", Ciphertext: "secret-bytes", Preview: "sk****3fA2", CreatedAt: "2026-09-22T05:43:04Z", UpdatedAt: "2026-09-23T05:43:04Z"},
 		{ID: "AAAAAAAA", Name: "infra/RAILWAY | TOKEN", Ciphertext: "secret-bytes", Preview: "****"},
 	})
 	if err := list([]string{"--json"}); err != nil {
@@ -52,7 +52,7 @@ func TestListJSON(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &items); err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 2 || items[0]["name"] != "infra/RAILWAY | TOKEN" || items[1]["name"] != "mom/OPENAI_API_KEY" {
+	if len(items) != 2 || items[0]["name"] != "infra/RAILWAY | TOKEN" || items[1]["name"] != "myapp/OPENAI_API_KEY" {
 		t.Fatalf("unexpected order: %v", items)
 	}
 	if items[0]["ref"] != "jt://secret/AAAAAAAA" || items[0]["created_at"] != nil || items[0]["updated_at"] != nil {
@@ -65,7 +65,7 @@ func TestListJSON(t *testing.T) {
 
 func TestListJSONQueryAndEmpty(t *testing.T) {
 	_, out := setup(t, []entry{
-		{ID: "AAAAAAAA", Name: "mom/OPENAI_API_KEY"},
+		{ID: "AAAAAAAA", Name: "myapp/OPENAI_API_KEY"},
 		{ID: "BBBBBBBB", Name: "infra/TOKEN"},
 	})
 	if err := list([]string{"OPENAI", "--json"}); err != nil {
@@ -88,11 +88,11 @@ func TestListJSONQueryAndEmpty(t *testing.T) {
 }
 
 func TestListTextUnchanged(t *testing.T) {
-	_, out := setup(t, []entry{{ID: "AAAAAAAA", Name: "mom/KEY", Preview: "ab**cd"}})
+	_, out := setup(t, []entry{{ID: "AAAAAAAA", Name: "myapp/KEY", Preview: "ab**cd"}})
 	if err := list(nil); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "mom/KEY | jt://secret/AAAAAAAA | ab**cd\n" {
+	if out.String() != "myapp/KEY | jt://secret/AAAAAAAA | ab**cd\n" {
 		t.Fatalf("text output changed: %q", out)
 	}
 }
