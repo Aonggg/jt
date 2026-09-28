@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	version = "0.1.3"
+	version = "0.2.0"
 	prefix  = "jt://secret/"
 )
 
@@ -40,6 +40,9 @@ type vault struct {
 	Version int     `json:"version"`
 	Secrets []entry `json:"secrets"`
 }
+
+// stdout is where list/status write their output; tests swap it.
+var stdout io.Writer = os.Stdout
 
 var tokenPattern = regexp.MustCompile("^jt://secret/[0-9A-Za-z]{8}$")
 var envPattern = regexp.MustCompile("^[A-Za-z_][A-Za-z0-9_]*$")
@@ -70,6 +73,8 @@ func main() {
 		err = initVault(os.Args[2:])
 	case "sync":
 		err = syncVault(os.Args[2:])
+	case "status":
+		err = status(os.Args[2:])
 	case "version":
 		fmt.Println("jt " + version)
 	case "help", "--help", "-h":
@@ -86,7 +91,7 @@ func main() {
 	}
 }
 func usage() {
-	fmt.Print("jt - encrypted, syncable secret references\n\nUsage:\n  jt init [--repo URL] [--vault DIR] [--key FILE]\n  jt add <name> [--from-clipboard] [--id ID]\n  jt ls [query]\n  jt set <name-or-ref> [--from-clipboard]\n  jt rm <name-or-ref>\n  jt mv <name-or-ref> <new-name>\n  jt resolve <name-or-ref> [--env NAME] --exec COMMAND [ARGS...]\n  jt env <namespace> -- COMMAND [ARGS...]\n  jt sync\n\nValues for add/set are read from stdin unless --from-clipboard is used.\nresolve without --exec prints the value and is intended for controlled use only.\n")
+	fmt.Print("jt - encrypted, syncable secret references\n\nUsage:\n  jt init [--repo URL] [--vault DIR] [--key FILE]\n  jt add <name> [--from-clipboard] [--id ID]\n  jt ls [--json] [query]\n  jt set <name-or-ref> [--from-clipboard]\n  jt rm <name-or-ref>\n  jt mv <name-or-ref> <new-name>\n  jt resolve <name-or-ref> [--env NAME] --exec COMMAND [ARGS...]\n  jt env <namespace> -- COMMAND [ARGS...]\n  jt sync\n  jt status [--json]\n\nValues for add/set are read from stdin unless --from-clipboard is used.\nresolve without --exec prints the value and is intended for controlled use only.\nls --json prints id, ref, name, preview and timestamps; it never includes ciphertext.\nstatus reports local vault state (uncommitted changes, commits not pushed) without network access.\n")
 }
 func paths() (string, string, string) {
 	home, err := os.UserHomeDir()
@@ -378,8 +383,27 @@ func add(args []string) error {
 	fmt.Printf("added %s %s\n", positional[0], prefix+id)
 	return nil
 }
+
+type listItem struct {
+	ID        string  `json:"id"`
+	Ref       string  `json:"ref"`
+	Name      string  `json:"name"`
+	Preview   string  `json:"preview"`
+	CreatedAt *string `json:"created_at"`
+	UpdatedAt *string `json:"updated_at"`
+}
+
 func list(args []string) error {
-	if len(args) > 1 {
+	asJSON := false
+	queries := []string{}
+	for _, arg := range args {
+		if arg == "--json" {
+			asJSON = true
+		} else {
+			queries = append(queries, arg)
+		}
+	}
+	if len(queries) > 1 {
 		return errors.New("ls accepts at most one query")
 	}
 	c, err := loadConfig()
@@ -391,17 +415,49 @@ func list(args []string) error {
 		return err
 	}
 	query := ""
-	if len(args) == 1 {
-		query = strings.ToLower(args[0])
+	if len(queries) == 1 {
+		query = queries[0]
 	}
-	sort.Slice(v.Secrets, func(i, j int) bool { return v.Secrets[i].Name < v.Secrets[j].Name })
-	for _, item := range v.Secrets {
-		if query != "" && !strings.Contains(strings.ToLower(item.Name), query) && !strings.Contains(item.ID, args[0]) {
-			continue
+	items := filterEntries(v.Secrets, query)
+	if asJSON {
+		out := make([]listItem, 0, len(items))
+		for _, item := range items {
+			out = append(out, listItem{ID: item.ID, Ref: prefix + item.ID, Name: item.Name, Preview: item.Preview, CreatedAt: optional(item.CreatedAt), UpdatedAt: optional(item.UpdatedAt)})
 		}
-		fmt.Printf("%s | %s | %s\n", item.Name, prefix+item.ID, item.Preview)
+		data, err := json.MarshalIndent(out, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "%s\n", data)
+		return err
+	}
+	for _, item := range items {
+		fmt.Fprintf(stdout, "%s | %s | %s\n", item.Name, prefix+item.ID, item.Preview)
 	}
 	return nil
+}
+func filterEntries(secrets []entry, query string) []entry {
+	lower := strings.ToLower(query)
+	items := []entry{}
+	for _, item := range secrets {
+		if query != "" && !strings.Contains(strings.ToLower(item.Name), lower) && !strings.Contains(item.ID, query) {
+			continue
+		}
+		items = append(items, item)
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].Name != items[j].Name {
+			return items[i].Name < items[j].Name
+		}
+		return items[i].ID < items[j].ID
+	})
+	return items
+}
+func optional(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 func find(v vault, ref string) (int, *entry, error) {
 	ref = strings.TrimSpace(ref)
@@ -723,4 +779,85 @@ func syncVault(args []string) error {
 		}
 	}
 	return runGit(c.Vault, "push", "origin", "HEAD")
+}
+
+type vaultStatus struct {
+	Vault string `json:"vault"`
+	Key   string `json:"key"`
+	Git   bool   `json:"git"`
+	Dirty bool   `json:"dirty"`
+	Ahead *int   `json:"ahead"`
+}
+
+// status only reads local git state; it never fetches, so "ahead" is relative to the last known remote ref.
+func status(args []string) error {
+	asJSON := false
+	for _, arg := range args {
+		if arg != "--json" {
+			return fmt.Errorf("unexpected argument %q", arg)
+		}
+		asJSON = true
+	}
+	c, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	st := vaultStatus{Vault: c.Vault, Key: c.Key}
+	if _, err := os.Stat(filepath.Join(c.Vault, ".git")); err == nil {
+		st.Git = true
+		out, err := gitOutput(c.Vault, "status", "--porcelain", "--", "vault.json")
+		if err != nil {
+			return err
+		}
+		st.Dirty = out != ""
+		st.Ahead = commitsAhead(c.Vault)
+	}
+	if asJSON {
+		data, err := json.MarshalIndent(st, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "%s\n", data)
+		return err
+	}
+	fmt.Fprintf(stdout, "vault  %s\nkey    %s\n", st.Vault, st.Key)
+	switch {
+	case !st.Git:
+		fmt.Fprintln(stdout, "sync   not a git repository")
+	case st.Dirty:
+		fmt.Fprintln(stdout, "sync   uncommitted changes; run jt sync")
+	case st.Ahead != nil && *st.Ahead > 0:
+		fmt.Fprintf(stdout, "sync   %d commit(s) not pushed; run jt sync\n", *st.Ahead)
+	default:
+		fmt.Fprintln(stdout, "sync   up to date with the last known remote state")
+	}
+	return nil
+}
+func gitOutput(dir string, args ...string) (string, error) {
+	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+// commitsAhead counts local commits missing from the upstream (or origin/<branch>); nil when there is no remote ref to compare with.
+func commitsAhead(dir string) *int {
+	base := "@{upstream}"
+	if _, err := gitOutput(dir, "rev-parse", "--verify", "--quiet", base); err != nil {
+		branch, err := gitOutput(dir, "symbolic-ref", "--short", "HEAD")
+		if err != nil {
+			return nil
+		}
+		base = "refs/remotes/origin/" + branch
+		if _, err := gitOutput(dir, "rev-parse", "--verify", "--quiet", base); err != nil {
+			return nil
+		}
+	}
+	out, err := gitOutput(dir, "rev-list", "--count", base+"..HEAD")
+	if err != nil {
+		return nil
+	}
+	var n int
+	if _, err := fmt.Sscanf(out, "%d", &n); err != nil {
+		return nil
+	}
+	return &n
 }
