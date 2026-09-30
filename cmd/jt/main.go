@@ -14,13 +14,15 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 const (
-	version = "0.2.0"
+	version = "0.3.0"
 	prefix  = "jt://secret/"
 )
 
@@ -29,12 +31,13 @@ type config struct {
 	Key   string `json:"key"`
 }
 type entry struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Ciphertext string `json:"ciphertext"`
-	Preview    string `json:"preview"`
-	CreatedAt  string `json:"created_at,omitempty"`
-	UpdatedAt  string `json:"updated_at,omitempty"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Ciphertext  string `json:"ciphertext"`
+	Preview     string `json:"preview"`
+	CreatedAt   string `json:"created_at,omitempty"`
+	UpdatedAt   string `json:"updated_at,omitempty"`
 }
 type vault struct {
 	Version int     `json:"version"`
@@ -61,6 +64,8 @@ func main() {
 		err = list(os.Args[2:])
 	case "set":
 		err = set(os.Args[2:])
+	case "describe":
+		err = describe(os.Args[2:])
 	case "rm", "remove":
 		err = remove(os.Args[2:])
 	case "mv", "rename":
@@ -91,7 +96,7 @@ func main() {
 	}
 }
 func usage() {
-	fmt.Print("jt - encrypted, syncable secret references\n\nUsage:\n  jt init [--repo URL] [--vault DIR] [--key FILE]\n  jt add <name> [--from-clipboard] [--id ID]\n  jt ls [--json] [query]\n  jt set <name-or-ref> [--from-clipboard]\n  jt rm <name-or-ref>\n  jt mv <name-or-ref> <new-name>\n  jt resolve <name-or-ref> [--env NAME] --exec COMMAND [ARGS...]\n  jt env <namespace> -- COMMAND [ARGS...]\n  jt sync\n  jt status [--json]\n\nValues for add/set are read from stdin unless --from-clipboard is used.\nresolve without --exec prints the value and is intended for controlled use only.\nls --json prints id, ref, name, preview and timestamps; it never includes ciphertext.\nstatus reports local vault state (uncommitted changes, commits not pushed) without network access.\n")
+	fmt.Print("jt - encrypted, syncable secret references\n\nUsage:\n  jt init [--repo URL] [--vault DIR] [--key FILE]\n  jt add <name> [--from-clipboard] [--id ID] [--description TEXT]\n  jt ls [--json] [query]\n  jt set <name-or-ref> [--from-clipboard] [--description TEXT]\n  jt describe <name-or-ref> <description>\n  jt rm <name-or-ref>\n  jt mv <name-or-ref> <new-name>\n  jt resolve <name-or-ref> [--env NAME] --exec COMMAND [ARGS...]\n  jt env <namespace> -- COMMAND [ARGS...]\n  jt sync\n  jt status [--json]\n\nValues for add/set are read from stdin unless --from-clipboard is used.\nresolve without --exec prints the value and is intended for controlled use only.\ndescribe edits only metadata; pass an empty string to clear the description.\nDescriptions are plaintext, synced metadata; never put secrets in them.\nThe first nonempty description upgrades the vault to v2; upgrade all clients first.\nls --json prints id, ref, name, description, preview and timestamps; never ciphertext.\nstatus reports local vault state (uncommitted changes, commits not pushed) without network access.\n")
 }
 func paths() (string, string, string) {
 	home, err := os.UserHomeDir()
@@ -178,15 +183,30 @@ func openVault(c config, create bool) (vault, []byte, error) {
 	if err := json.Unmarshal(data, &v); err != nil {
 		return v, nil, fmt.Errorf("read vault: %w", err)
 	}
-	if v.Version != 1 {
+	if v.Version != 1 && v.Version != 2 {
 		return v, nil, fmt.Errorf("unsupported vault version %d", v.Version)
 	}
 	return v, key, nil
 }
 func saveVault(c config, v vault) error {
+	if v.Version != 1 && v.Version != 2 {
+		return fmt.Errorf("unsupported vault version %d", v.Version)
+	}
+	// Older clients reject v2 instead of silently dropping unknown entry fields.
+	// Never downgrade after descriptions have been cleared or entries removed.
+	for _, item := range v.Secrets {
+		if item.Description != "" {
+			v.Version = 2
+			break
+		}
+	}
 	if err := os.MkdirAll(c.Vault, 0700); err != nil {
 		return err
 	}
+	// Sort a copy: callers may still hold a pointer to an entry for their result.
+	secrets := make([]entry, len(v.Secrets))
+	copy(secrets, v.Secrets)
+	v.Secrets = secrets
 	sort.Slice(v.Secrets, func(i, j int) bool { return v.Secrets[i].Name < v.Secrets[j].Name })
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -305,30 +325,72 @@ func readValue(fromClipboard bool) (string, error) {
 	}
 	return strings.TrimSuffix(string(data), "\n"), nil
 }
-func parseFlags(args []string) (bool, string, []string, error) {
-	var clip, id string
-	rest := []string{}
+
+type writeOptions struct {
+	fromClipboard bool
+	id            string
+	description   *string // nil means leave the existing description unchanged.
+	positional    []string
+}
+
+// Flags may precede or follow positional arguments. Use -- to end flags, or
+// --description=TEXT for a description beginning with a dash.
+func parseWriteFlags(args []string, allowID bool) (writeOptions, error) {
+	var opts writeOptions
+	seen := map[string]bool{}
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--from-clipboard":
-			clip = "1"
-		case "--id":
-			if i+1 >= len(args) {
-				return false, "", nil, errors.New("--id needs a value")
+		arg := args[i]
+		if arg == "--" {
+			opts.positional = append(opts.positional, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			opts.positional = append(opts.positional, arg)
+			continue
+		}
+		name, value, hasValue := strings.Cut(arg, "=")
+		if name != "--from-clipboard" && name != "--description" && !(allowID && name == "--id") {
+			return opts, fmt.Errorf("unknown option %q", name)
+		}
+		if seen[name] {
+			return opts, fmt.Errorf("duplicate option %s", name)
+		}
+		seen[name] = true
+		if name == "--from-clipboard" {
+			if hasValue {
+				return opts, errors.New("--from-clipboard does not take a value")
 			}
-			id = args[i+1]
+			opts.fromClipboard = true
+			continue
+		}
+		if !hasValue {
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+				return opts, fmt.Errorf("%s needs a value (use %s=TEXT for a value beginning with a dash)", name, name)
+			}
 			i++
-		default:
-			rest = append(rest, args[i])
+			value = args[i]
+		}
+		switch name {
+		case "--id":
+			if !idPattern.MatchString(value) {
+				return opts, errors.New("id must be 8 base62 characters")
+			}
+			opts.id = value
+		case "--description":
+			if !utf8.ValidString(value) {
+				return opts, errors.New("description must be valid UTF-8")
+			}
+			opts.description = &value
 		}
 	}
-	return clip == "1", id, rest, nil
+	return opts, nil
 }
 func add(args []string) error {
-	fromClipboard, suppliedID, positional, err := parseFlags(args)
+	opts, err := parseWriteFlags(args, true)
 	if err != nil {
 		return err
 	}
+	positional := opts.positional
 	if len(positional) != 1 || positional[0] == "" {
 		return errors.New("add needs <name>")
 	}
@@ -340,7 +402,7 @@ func add(args []string) error {
 	if err != nil {
 		return err
 	}
-	value, err := readValue(fromClipboard)
+	value, err := readValue(opts.fromClipboard)
 	if err != nil {
 		return err
 	}
@@ -352,7 +414,7 @@ func add(args []string) error {
 			return fmt.Errorf("name already exists: %s", positional[0])
 		}
 	}
-	id := suppliedID
+	id := opts.id
 	if id == "" {
 		ids := map[string]bool{}
 		for _, item := range v.Secrets {
@@ -376,7 +438,11 @@ func add(args []string) error {
 		return err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	v.Secrets = append(v.Secrets, entry{ID: id, Name: positional[0], Ciphertext: ciphertext, Preview: preview(value), CreatedAt: now, UpdatedAt: now})
+	item := entry{ID: id, Name: positional[0], Ciphertext: ciphertext, Preview: preview(value), CreatedAt: now, UpdatedAt: now}
+	if opts.description != nil {
+		item.Description = *opts.description
+	}
+	v.Secrets = append(v.Secrets, item)
 	if err := saveVault(c, v); err != nil {
 		return err
 	}
@@ -385,12 +451,13 @@ func add(args []string) error {
 }
 
 type listItem struct {
-	ID        string  `json:"id"`
-	Ref       string  `json:"ref"`
-	Name      string  `json:"name"`
-	Preview   string  `json:"preview"`
-	CreatedAt *string `json:"created_at"`
-	UpdatedAt *string `json:"updated_at"`
+	ID          string  `json:"id"`
+	Ref         string  `json:"ref"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Preview     string  `json:"preview"`
+	CreatedAt   *string `json:"created_at"`
+	UpdatedAt   *string `json:"updated_at"`
 }
 
 func list(args []string) error {
@@ -422,7 +489,7 @@ func list(args []string) error {
 	if asJSON {
 		out := make([]listItem, 0, len(items))
 		for _, item := range items {
-			out = append(out, listItem{ID: item.ID, Ref: prefix + item.ID, Name: item.Name, Preview: item.Preview, CreatedAt: optional(item.CreatedAt), UpdatedAt: optional(item.UpdatedAt)})
+			out = append(out, listItem{ID: item.ID, Ref: prefix + item.ID, Name: item.Name, Description: item.Description, Preview: item.Preview, CreatedAt: optional(item.CreatedAt), UpdatedAt: optional(item.UpdatedAt)})
 		}
 		data, err := json.MarshalIndent(out, "", "  ")
 		if err != nil {
@@ -432,7 +499,12 @@ func list(args []string) error {
 		return err
 	}
 	for _, item := range items {
-		fmt.Fprintf(stdout, "%s | %s | %s\n", item.Name, prefix+item.ID, item.Preview)
+		if item.Description == "" {
+			fmt.Fprintf(stdout, "%s | %s | %s\n", item.Name, prefix+item.ID, item.Preview)
+		} else {
+			// Quote metadata so newlines and terminal controls cannot forge list rows.
+			fmt.Fprintf(stdout, "%s | %s | %s | %s\n", item.Name, prefix+item.ID, item.Preview, strconv.QuoteToGraphic(item.Description))
+		}
 	}
 	return nil
 }
@@ -440,7 +512,7 @@ func filterEntries(secrets []entry, query string) []entry {
 	lower := strings.ToLower(query)
 	items := []entry{}
 	for _, item := range secrets {
-		if query != "" && !strings.Contains(strings.ToLower(item.Name), lower) && !strings.Contains(item.ID, query) {
+		if query != "" && !strings.Contains(strings.ToLower(item.Name), lower) && !strings.Contains(strings.ToLower(item.Description), lower) && !strings.Contains(item.ID, query) {
 			continue
 		}
 		items = append(items, item)
@@ -472,11 +544,12 @@ func find(v vault, ref string) (int, *entry, error) {
 	return -1, nil, errors.New("secret not found")
 }
 func set(args []string) error {
-	fromClipboard, _, positional, err := parseFlags(args)
+	opts, err := parseWriteFlags(args, false)
 	if err != nil {
 		return err
 	}
-	if len(positional) != 1 {
+	positional := opts.positional
+	if len(positional) != 1 || positional[0] == "" {
 		return errors.New("set needs <name-or-ref>")
 	}
 	c, err := loadConfig()
@@ -491,7 +564,7 @@ func set(args []string) error {
 	if err != nil {
 		return err
 	}
-	value, err := readValue(fromClipboard)
+	value, err := readValue(opts.fromClipboard)
 	if err != nil {
 		return err
 	}
@@ -501,6 +574,9 @@ func set(args []string) error {
 	ciphertext, err := seal(key, value)
 	if err != nil {
 		return err
+	}
+	if opts.description != nil {
+		item.Description = *opts.description
 	}
 	item.Ciphertext = ciphertext
 	item.Preview = preview(value)
@@ -512,6 +588,39 @@ func set(args []string) error {
 	fmt.Printf("updated %s %s\n", item.Name, prefix+item.ID)
 	return nil
 }
+
+// describe never reads stdin or decrypts/re-encrypts the value. The ID,
+// ciphertext, preview and creation time remain unchanged.
+func describe(args []string) error {
+	if len(args) != 2 || args[0] == "" {
+		return errors.New("describe needs <name-or-ref> <description>; use an empty string to clear")
+	}
+	if !utf8.ValidString(args[1]) {
+		return errors.New("description must be valid UTF-8")
+	}
+	c, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	v, _, err := openVault(c, false)
+	if err != nil {
+		return err
+	}
+	_, item, err := find(v, args[0])
+	if err != nil {
+		return err
+	}
+	if item.Description != args[1] {
+		item.Description = args[1]
+		item.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		if err := saveVault(c, v); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("described %s %s\n", item.Name, prefix+item.ID)
+	return nil
+}
+
 func remove(args []string) error {
 	if len(args) != 1 {
 		return errors.New("rm needs <name-or-ref>")
@@ -528,11 +637,12 @@ func remove(args []string) error {
 	if err != nil {
 		return err
 	}
+	removed := *item
 	v.Secrets = append(v.Secrets[:index], v.Secrets[index+1:]...)
 	if err := saveVault(c, v); err != nil {
 		return err
 	}
-	fmt.Printf("removed %s %s\n", item.Name, prefix+item.ID)
+	fmt.Printf("removed %s %s\n", removed.Name, prefix+removed.ID)
 	return nil
 }
 func rename(args []string) error {
