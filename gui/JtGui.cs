@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -59,7 +60,7 @@ namespace JtGui
         }
     }
 
-    // Settings keeps the two preferences in HKCU; the autostart entry is the standard Run key.
+    // Settings keeps the preferences in HKCU; the autostart entry is the standard Run key.
     static class Settings
     {
         const string Key = @"Software\jt-gui";
@@ -69,6 +70,13 @@ namespace JtGui
         {
             get { return Read("ClearHistory") != 0; }
             set { Write("ClearHistory", value ? 1 : 0); }
+        }
+
+        // AutoSync defaults to on: a vault that is only on this disk is not backed up.
+        public static bool AutoSync
+        {
+            get { return Read("AutoSync", 1) != 0; }
+            set { Write("AutoSync", value ? 1 : 0); }
         }
 
         public static bool Autostart
@@ -92,10 +100,15 @@ namespace JtGui
 
         static int Read(string name)
         {
+            return Read(name, 0);
+        }
+
+        static int Read(string name, int fallback)
+        {
             using (RegistryKey k = Registry.CurrentUser.OpenSubKey(Key))
             {
                 object value = k == null ? null : k.GetValue(name);
-                return value is int ? (int)value : 0;
+                return value is int ? (int)value : fallback;
             }
         }
 
@@ -403,9 +416,13 @@ namespace JtGui
         readonly ToolStripStatusLabel status = new ToolStripStatusLabel();
         readonly NotifyIcon tray = new NotifyIcon();
         readonly ToolStripMenuItem autostart = new ToolStripMenuItem("开机自动启动到托盘");
+        readonly ToolStripMenuItem autosync = new ToolStripMenuItem("改动后自动同步");
         List<Secret> secrets = new List<Secret>();
         string hotkeyNote = "";
         string syncNote = "";
+        // Auto-sync pushes once per change; a failed push is not retried until the vault changes again.
+        string lastAutoSyncSignature;
+        bool syncing;
 
         public MainForm(bool startHidden, EventWaitHandle showSignal)
         {
@@ -597,6 +614,15 @@ namespace JtGui
                 autostart.Checked = Settings.Autostart;
             };
             menu.Items.Add(autostart);
+            autosync.Checked = Settings.AutoSync;
+            autosync.ToolTipText = "每次抓取、新建、改值、改名、删除后自动运行 jt sync，推到远端（再由远端触发 Notion 等镜像）";
+            autosync.Click += delegate
+            {
+                Settings.AutoSync = !autosync.Checked;
+                autosync.Checked = Settings.AutoSync;
+                if (Settings.AutoSync) Reload();
+            };
+            menu.Items.Add(autosync);
             menu.Items.Add("AI 设置…", null, (s, e) => AiSetup());
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("退出", null, (s, e) => Quit());
@@ -624,11 +650,14 @@ namespace JtGui
         protected override void SetVisibleCore(bool value)
         {
             // --tray: create the handle (hotkeys and the show signal need it) but stay hidden.
+            // Load never fires while hidden, so read the vault here too: a change that could not
+            // be pushed last time (offline, closed too early) is auto-synced as soon as we start.
             if (startHidden && !shownOnce)
             {
                 shownOnce = true;
                 if (!IsHandleCreated) CreateHandle();
                 value = false;
+                BeginInvoke(new Action(Reload));
             }
             base.SetVisibleCore(value);
         }
@@ -754,6 +783,22 @@ namespace JtGui
             else syncNote = "已同步";
             ApplyFilter();
             ShowSummary();
+            if (st == null || !st.Git || !Settings.AutoSync || syncing) return;
+            bool pending = st.Dirty || (st.Ahead.HasValue && st.Ahead.Value > 0);
+            if (!pending) return;
+            string signature = ChangeSignature(items);
+            if (signature == lastAutoSyncSignature) return;
+            lastAutoSyncSignature = signature;
+            Sync(true);
+        }
+
+        // ChangeSignature identifies the vault content as far as the list shows it, so a
+        // sync that failed is retried only after the user changes something.
+        static string ChangeSignature(List<Secret> items)
+        {
+            var sb = new StringBuilder();
+            foreach (Secret s in items) sb.Append(s.Id).Append('\u001f').Append(s.Name).Append('\u001f').Append(s.Description).Append('\u001f').Append(s.UpdatedAt).Append('\u001e');
+            return sb.ToString();
         }
 
         // ApplyFilter rebuilds the rows, grouped by namespace so a block that was
@@ -1381,17 +1426,27 @@ namespace JtGui
 
         void Sync()
         {
-            SetStatus("正在同步…");
-            UseWaitCursor = true;
+            Sync(false);
+        }
+
+        // automatic: no balloon on success (the status bar already says 已同步), balloon instead of a modal on failure.
+        void Sync(bool automatic)
+        {
+            if (syncing) return;
+            syncing = true;
+            SetStatus(automatic ? "正在自动同步…" : "正在同步…");
+            UseWaitCursor = !automatic;
             ThreadPool.QueueUserWorkItem(delegate
             {
                 JtResult r = Jt.Run(new[] { "sync" }, null);
                 BeginInvoke(new Action(() =>
                 {
                     UseWaitCursor = false;
+                    syncing = false;
                     Reload();
-                    if (r.Ok) Notify("同步完成", "vault 已与远端一致");
-                    else Fail("同步失败", r);
+                    if (r.Ok && !automatic) Notify("同步完成", "vault 已与远端一致");
+                    else if (!r.Ok && automatic) Notify("自动同步失败", r.Error + "\n改动仍在本机；点工具栏“同步”重试");
+                    else if (!r.Ok) Fail("同步失败", r);
                 }));
             });
         }

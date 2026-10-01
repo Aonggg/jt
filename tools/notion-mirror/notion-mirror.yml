@@ -1,0 +1,23 @@
+name: notion-mirror
+on:
+  push:
+    branches: [master]
+    paths: [vault.json, .github/**]
+  workflow_dispatch:
+concurrency:
+  group: notion-mirror
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mirror vault.json to Notion (ciphertext and metadata only)
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_PAGE_ID: ${{ vars.NOTION_PAGE_ID }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: python3 .github/scripts/notion_mirror.py
