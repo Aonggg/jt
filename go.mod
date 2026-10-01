@@ -1,4 +1,4 @@
-module github.com/catoncat/jt
+module github.com/Aonggg/jt
 
 go 1.26.0
 
