@@ -4,7 +4,7 @@ on:
     branches: ['**']
   pull_request:
 jobs:
-  test:
+  windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,3 +20,13 @@ jobs:
       - run: go test ./...
       - run: .\build.ps1
         shell: pwsh
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go build -trimpath -ldflags '-s -w' -o jt ./cmd/jt

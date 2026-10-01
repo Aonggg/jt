@@ -1,9 +1,6 @@
-//go:build windows
-
 package main
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -12,22 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"unsafe"
-
-	"golang.org/x/sys/windows"
 )
 
-// keyMagic prefixes a master key file that holds a DPAPI blob. A file of
-// exactly 32 raw bytes (the format used by jt on macOS and Linux) is read as
-// well, so a key copied from another platform works without conversion.
+// keyMagic prefixes a master key file that holds a Windows DPAPI blob. The
+// other file format is 32 raw bytes, used on Linux, macOS and inside WSL; a
+// raw key file works on Windows too, so a key can be copied either way.
 const keyMagic = "JTDPAPI1"
 
-// keyEntropy binds the DPAPI blob to jt: another program running as the same
-// user cannot unprotect it by accident, only on purpose.
-var keyEntropy = []byte("jt master key")
-
-// loadKey returns the 32-byte master key, creating a DPAPI-protected one when
-// create is set and no key file exists.
+// loadKey returns the 32-byte master key, creating one (in the platform's
+// file format) when create is set and no key file exists.
 func loadKey(path string, create bool) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) && create {
@@ -43,59 +33,15 @@ func loadKey(path string, create bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return decodeKey(data)
+	return decodeKeyFile(data)
 }
 
 func writeKey(path string, raw []byte) error {
-	blob, err := protectKey(raw)
+	data, err := encodeKeyFile(raw)
 	if err != nil {
-		return fmt.Errorf("protect key: %w", err)
+		return err
 	}
-	return atomicWrite(path, blob)
-}
-
-func decodeKey(data []byte) ([]byte, error) {
-	if len(data) == 32 {
-		return data, nil
-	}
-	if !bytes.HasPrefix(data, []byte(keyMagic)) {
-		return nil, errors.New("key file must be a jt DPAPI key or contain 32 raw bytes")
-	}
-	raw, err := unprotectKey(data[len(keyMagic):])
-	if err != nil {
-		return nil, fmt.Errorf("unprotect key (created by another Windows user or machine?): %w", err)
-	}
-	if len(raw) != 32 {
-		return nil, errors.New("protected key must contain 32 bytes")
-	}
-	return raw, nil
-}
-
-func protectKey(raw []byte) ([]byte, error) {
-	in := windows.DataBlob{Size: uint32(len(raw)), Data: &raw[0]}
-	entropy := windows.DataBlob{Size: uint32(len(keyEntropy)), Data: &keyEntropy[0]}
-	var out windows.DataBlob
-	if err := windows.CryptProtectData(&in, nil, &entropy, 0, nil, windows.CRYPTPROTECT_UI_FORBIDDEN, &out); err != nil {
-		return nil, err
-	}
-	defer windows.LocalFree(windows.Handle(unsafe.Pointer(out.Data)))
-	blob := make([]byte, 0, len(keyMagic)+int(out.Size))
-	blob = append(blob, keyMagic...)
-	return append(blob, unsafe.Slice(out.Data, out.Size)...), nil
-}
-
-func unprotectKey(blob []byte) ([]byte, error) {
-	if len(blob) == 0 {
-		return nil, errors.New("empty blob")
-	}
-	in := windows.DataBlob{Size: uint32(len(blob)), Data: &blob[0]}
-	entropy := windows.DataBlob{Size: uint32(len(keyEntropy)), Data: &keyEntropy[0]}
-	var out windows.DataBlob
-	if err := windows.CryptUnprotectData(&in, nil, &entropy, 0, nil, windows.CRYPTPROTECT_UI_FORBIDDEN, &out); err != nil {
-		return nil, err
-	}
-	defer windows.LocalFree(windows.Handle(unsafe.Pointer(out.Data)))
-	return bytes.Clone(unsafe.Slice(out.Data, out.Size)), nil
+	return atomicWrite(path, data)
 }
 
 // keyCommand moves the master key between machines. export never prints the
@@ -122,8 +68,7 @@ func keyCommand(args []string) error {
 			return err
 		}
 		fmt.Println("master key copied to clipboard (excluded from clipboard history)")
-		fmt.Println("on the other machine run: jt key import   (reads the clipboard)")
-		fmt.Println("for jt on macOS/Linux:   echo '<paste>' | base64 -d > ~/.config/jt/key")
+		fmt.Println(keyImportHint)
 		return nil
 	case "import":
 		if len(args) > 2 {

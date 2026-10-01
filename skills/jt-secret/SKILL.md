@@ -9,6 +9,8 @@ description: Consume and name jt secret references (`jt://secret/...`) and group
 
 名称和引用都能用：`jt resolve cf/CLOUDFLARE_API_TOKEN ...` 与 `jt resolve jt://secret/Abcd1234 ...` 等价。
 
+同一台机器上所有终端共用一个 vault：Windows 侧（Claude Code、omp、pi 等）运行 `jt`（`jt.exe`），WSL 里运行 Linux 版 `jt`，引用和命令完全相同；区别只在 shell——Windows 用 `cmd /C` 或 `bash -c`，WSL/Linux 用 `bash -c`/`sh -c`。在 WSL 里不要调用 `jt.exe`：它启动的是 Windows 进程，注入不到 Linux 命令里。
+
 ## 整组引用 `jt://env/<命名空间>`
 
 用户也可能贴来一整组，格式固定：第一行是组引用 `jt://env/cf`（后面可能跟一句中文提示），之后每行一条 `名称  引用`：
@@ -38,7 +40,7 @@ cf/AWS_SECRET_ACCESS_KEY  jt://secret/51Jaynpt
      ```
    - **要把值写进命令行参数或请求头**（curl 之类）：必须显式起一个 shell，让 shell 在子进程里展开变量。`jt` 不会替你猜 shell。
      ```powershell
-     # Git Bash（Claude Code 的 Bash 工具就是它）
+     # Git Bash（Claude Code 的 Bash 工具就是它）；WSL / Linux 里同样用 bash -c
      jt resolve jt://secret/Abcd1234 --exec bash -c 'curl -s -H "Authorization: Bearer $JT_SECRET" https://api.cloudflare.com/client/v4/user/tokens/verify'
      # cmd
      jt resolve jt://secret/Abcd1234 --exec cmd /C "curl -s -H \"Authorization: Bearer %JT_SECRET%\" https://api.cloudflare.com/client/v4/user/tokens/verify"

@@ -1,9 +1,8 @@
-//go:build windows
-
 package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -204,5 +203,32 @@ func TestInitClonesExistingRemoteAndSyncRepeats(t *testing.T) {
 	}
 	if st := readStatus(t, out); !st.Git || st.Dirty || st.Ahead == nil || *st.Ahead != 0 {
 		t.Fatalf("second machine status: %+v", st)
+	}
+	if _, err := os.Stat(filepath.Join(second, "key")); err != nil {
+		t.Fatal("an empty cloned vault gets a fresh key")
+	}
+
+	// A machine joining a vault that already holds ciphertext must not mint its
+	// own key; `jt key import` then works without moving anything away.
+	if err := os.WriteFile(filepath.Join(second, "vault", "vault.json"), []byte(`{"version":1,"secrets":[{"id":"Abcd1234","name":"app/KEY","ciphertext":"opaque","preview":"***"}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncVault(nil); err != nil {
+		t.Fatal(err)
+	}
+	third := t.TempDir()
+	t.Setenv("JT_HOME", third)
+	if err := initVault([]string{"--repo", remote}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(third, "key")); !os.IsNotExist(err) {
+		t.Fatal("init must not create a key for a vault that already has entries")
+	}
+	useFakeClipboard(t, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), false)
+	if err := keyCommand([]string{"import"}); err != nil {
+		t.Fatalf("key import after init: %v", err)
+	}
+	if err := list(nil); err != nil {
+		t.Fatalf("vault unreadable after import: %v", err)
 	}
 }

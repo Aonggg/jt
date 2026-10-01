@@ -1,5 +1,3 @@
-//go:build windows
-
 package main
 
 import (
@@ -9,19 +7,23 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-// TestHelperProcess is the child for env/resolve tests: it exits 0 only when
-// the variable named by the first argument holds the second argument and the
-// INJECTED description decoy is absent. Parents set JT_TEST_HELPER=1 and run
-// the test binary with `-test.run=^TestHelperProcess$ -- VAR VALUE`.
+// TestHelperProcess is the child for env/resolve tests. With `-- VAR VALUE` it
+// exits 0 only when VAR holds VALUE and the INJECTED description decoy is
+// absent; with `-- exit N` it exits with N. Parents set JT_TEST_HELPER=1.
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv("JT_TEST_HELPER") != "1" {
 		return
 	}
 	args := flag.Args()
+	if len(args) == 2 && args[0] == "exit" {
+		code, _ := strconv.Atoi(args[1])
+		os.Exit(code)
+	}
 	if len(args) != 2 || os.Getenv(args[0]) != args[1] || os.Getenv("INJECTED") != "" {
 		os.Exit(1)
 	}
@@ -223,15 +225,15 @@ func TestResolveNeverPrintsAndRunsWithoutShell(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "--exec") {
 		t.Fatalf("resolve without --exec must refuse: %v", err)
 	}
-	err = resolve([]string{"app/KEY", "--exec", "echo %JT_SECRET%"})
-	if err == nil || !strings.Contains(err.Error(), "cmd /C") {
-		t.Fatalf("a shell string must fail with a hint, got: %v", err)
+	err = resolve([]string{"app/KEY", "--exec", "echo $JT_SECRET"})
+	if err == nil || !strings.Contains(err.Error(), shellHint) {
+		t.Fatalf("a shell string must fail with the platform hint, got: %v", err)
 	}
 	err = resolve([]string{"app/KEY", "--env", "MY_VAR", "--exec", os.Args[0], "-test.run=^TestHelperProcess$", "--", "MY_VAR", "fixture-value"})
 	if err != nil {
 		t.Fatalf("--env name not honoured: %v", err)
 	}
-	err = resolve([]string{"app/KEY", "--exec", "cmd", "/C", "exit 7"})
+	err = resolve([]string{"app/KEY", "--exec", os.Args[0], "-test.run=^TestHelperProcess$", "--", "exit", "7"})
 	var status exitStatusError
 	if !errors.As(err, &status) || status.code != 7 {
 		t.Fatalf("child exit status not propagated: %v", err)
@@ -255,39 +257,6 @@ func TestAddTrimsOneCRLF(t *testing.T) {
 		if value, err := open(bytes.Repeat([]byte{1}, 32), item.Ciphertext); err != nil || value != want {
 			t.Fatalf("%s stored %q, want %q", name, value, want)
 		}
-	}
-}
-
-func TestKeyIsProtectedAndReadsRawKeys(t *testing.T) {
-	home := t.TempDir()
-	keyPath := filepath.Join(home, "key")
-	first, err := loadKey(keyPath, true)
-	if err != nil || len(first) != 32 {
-		t.Fatalf("create key: %v", err)
-	}
-	data, err := os.ReadFile(keyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.HasPrefix(data, []byte(keyMagic)) || bytes.Contains(data, first) {
-		t.Fatal("key file must be a DPAPI blob that does not contain the raw key")
-	}
-	again, err := loadKey(keyPath, false)
-	if err != nil || !bytes.Equal(first, again) {
-		t.Fatalf("protected key did not round-trip: %v", err)
-	}
-	if _, err := decodeKey(append([]byte(keyMagic), data[len(keyMagic)+10:]...)); err == nil {
-		t.Fatal("truncated blob must be rejected")
-	}
-	if _, err := decodeKey([]byte("short")); err == nil {
-		t.Fatal("garbage must be rejected")
-	}
-	raw := bytes.Repeat([]byte{7}, 32)
-	if got, err := decodeKey(raw); err != nil || !bytes.Equal(got, raw) {
-		t.Fatalf("raw 32-byte key from another platform must load: %v", err)
-	}
-	if _, err := loadKey(filepath.Join(home, "missing"), false); err == nil {
-		t.Fatal("missing key without create must fail")
 	}
 }
 

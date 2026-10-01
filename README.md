@@ -136,10 +136,31 @@ API 令牌是cfat_…
 
 ## 给 AI 用
 
-1. 把 `skills/jt-secret/` 复制到你所用 Agent 的 skills 目录。Claude Code：`%USERPROFILE%\.claude\skills\jt-secret\SKILL.md`（项目级放 `.claude\skills\`）。
-2. 对话里只贴引用。`jt ls` 或 `jt ref <name>` 随时能拿到引用。
-3. Agent 看到 `jt://secret/...` 时会用 `jt resolve ... --exec` / `jt env` 消费真值，并按 skill 里的规则不打印、不落盘。
+1. 把 `skills/jt-secret/` 复制到你所用 Agent 的 skills 目录，每个 Agent 一份：
+   - Claude Code：`%USERPROFILE%\.claude\skills\jt-secret\SKILL.md`（项目级放 `.claude\skills\`）
+   - omp：`%USERPROFILE%\.agents\skills\jt-secret\SKILL.md`
+   - pi：`%USERPROFILE%\.pi\agent\skills\jt-secret\SKILL.md`
+   - WSL 里的 Agent：对应的 Linux 家目录，如 `~/.agents/skills/jt-secret/`、`~/.claude/skills/jt-secret/`
+2. 对话里只贴引用。`jt ls` 或 `jt ref <name>` 随时能拿到引用；贴整组就 `jt ref cf`。
+3. Agent 看到 `jt://secret/...` 或 `jt://env/...` 时会用 `jt resolve ... --exec` / `jt env` 消费真值，并按 skill 里的规则不打印、不落盘。
 4. 给 AI 的 token 用**最小权限**：Cloudflare 后台为这件事单独建一个 token，只限定需要的 zone 和权限，用完可以直接吊销。
+
+### 一台电脑上的所有终端
+
+引用是机器级的，不属于某个 AI：任何能运行 `jt` 的终端都能用同一份 vault——Claude Code、omp、pi，PowerShell、cmd、Git Bash 里的都一样，因为 `jt.exe` 在用户 PATH 上，密钥和 vault 在 `%LOCALAPPDATA%\jt`。没装 skill 的 Agent 看到剪贴板里那段"整组注入：jt env cf -- <命令>"也知道怎么做，只是不如装了 skill 稳。
+
+**WSL 是另一个操作系统**，Windows 版 `jt.exe` 在 WSL 里虽然能调用，但它启动的是 Windows 进程，注入不到 Linux 命令里。所以 WSL 里要装 Linux 版的 `jt`，共用同一个 vault：
+
+```bash
+# 在 WSL 里（以 release 的 amd64 包为例）
+curl -fsSL https://github.com/Aonggg/jt/releases/latest/download/jt-linux-amd64.tar.gz | tar -xz -C /usr/local/bin jt
+jt key import                 # 先在 Windows 侧 jt key export，这里直接读 Windows 剪贴板
+jt init --vault /mnt/c/Users/<你>/AppData/Local/jt/vault   # 共用 Windows 那份 vault（同一个 git 仓库）
+jt ls
+jt env cf -- bash -c 'echo ${#CLOUDFLARE_API_TOKEN}'       # 注入的是 Linux 进程
+```
+
+Linux 版和 Windows 版命令一致：`grab`/`ref`/`copy`/`key export` 读写的是 Windows 剪贴板（通过 `powershell.exe`），`--clear-history` 也能清 Win+V。密钥文件是原版 jt 的 32 字节裸格式，存在 `~/.config/jt/key`；`jt init` 发现 vault 里已有条目时不会另造密钥，而是提示你导入。不想共用目录也可以在 WSL 里 `jt init --repo <私有仓库>` 单独 clone，靠 `jt sync` 同步。
 
 ## 边界，别高估
 
@@ -150,7 +171,7 @@ API 令牌是cfat_…
 
 ## 与原版 jt 的差异
 
-- 只构建 Windows；默认目录 `%LOCALAPPDATA%\jt`（原版 `~/.config/jt`）。
+- Windows 构建：默认目录 `%LOCALAPPDATA%\jt`（原版 `~/.config/jt`），主密钥 DPAPI 保护；Linux 构建保留原版布局和裸密钥文件，面向 WSL，读写 Windows 剪贴板走 `powershell.exe` 互操作。
 - 主密钥 DPAPI 保护，同时能读原版的 32 字节裸密钥文件；新增 `jt key export / import`。
 - 新增 `grab`、`ref`、`copy`，对应 jiantieban 的标记为密钥、贴引用、贴明文。
 - `resolve` 必须带 `--exec`，jt 不再向 stdout 打印任何真值。

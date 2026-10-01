@@ -1,9 +1,8 @@
-//go:build windows
-
 // jt stores secrets AES-GCM encrypted in a Git-synced vault and hands them to
 // programs as jt://secret/<id> references, so an AI agent can use a credential
-// without the plaintext ever entering its context. This build is Windows-only:
-// the master key is DPAPI-protected and the clipboard is the capture channel.
+// without the plaintext ever entering its context. Built for Windows (DPAPI
+// key, Win32 clipboard) and for Linux inside WSL, where the same vault is
+// shared and the Windows clipboard is reached through interop.
 package main
 
 import (
@@ -28,7 +27,7 @@ import (
 )
 
 const (
-	version = "0.5.5"
+	version = "0.6.0"
 	prefix  = "jt://secret/"
 	// groupPrefix names a whole namespace: jt://env/cf stands for every cf/* entry.
 	groupPrefix = "jt://env/"
@@ -148,20 +147,12 @@ status reports local vault state (uncommitted changes, commits not pushed) witho
 `)
 }
 
-// paths resolves config, vault and key locations. Everything defaults to
-// %LOCALAPPDATA%\jt: machine-local, so a roaming profile never carries the key.
+// paths resolves config, vault and key locations under JT_HOME or the
+// platform default (%LOCALAPPDATA%\jt on Windows, ~/.config/jt elsewhere).
 func paths() (string, string, string) {
 	base := os.Getenv("JT_HOME")
 	if base == "" {
-		local := os.Getenv("LOCALAPPDATA")
-		if local == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				home = "."
-			}
-			local = filepath.Join(home, "AppData", "Local")
-		}
-		base = filepath.Join(local, "jt")
+		base = defaultBase()
 	}
 	vaultDir := os.Getenv("JT_VAULT_DIR")
 	if vaultDir == "" {
@@ -840,7 +831,7 @@ func resolve(args []string) error {
 	if !envPattern.MatchString(envName) {
 		return errors.New("invalid environment variable name")
 	}
-	return runWithEnv(command, append(os.Environ(), envName+"="+value))
+	return runWithEnv(command, append(os.Environ(), envName+"="+value), []string{envName})
 }
 
 type exitStatusError struct{ code int }
@@ -860,6 +851,7 @@ func env(args []string) error {
 		return err
 	}
 	environment := append([]string{}, os.Environ()...)
+	var names []string
 	injected := 0
 	for _, item := range v.Secrets {
 		if !strings.HasPrefix(item.Name, namespace+"/") {
@@ -874,20 +866,22 @@ func env(args []string) error {
 			return err
 		}
 		environment = append(environment, name+"="+value)
+		names = append(names, name)
 		injected++
 	}
 	if injected == 0 {
 		return fmt.Errorf("no secrets found for namespace %q", namespace)
 	}
-	return runWithEnv(args[2:], environment)
+	return runWithEnv(args[2:], environment, names)
 }
 
-// runWithEnv executes command directly with the given environment. jt never
-// starts a shell on its own: the caller names one (cmd /C, bash -c) when the
-// command needs shell syntax, so there is no guessing which shell expands $VAR.
-func runWithEnv(command, environment []string) error {
+// runWithEnv executes command directly with the given environment plus the
+// named variables. jt never starts a shell on its own: the caller names one
+// (cmd /C, sh -c) when the command needs shell syntax, so there is no guessing
+// which shell expands $VAR.
+func runWithEnv(command, environment, names []string) error {
 	cmd := exec.Command(command[0], command[1:]...)
-	cmd.Env = environment
+	cmd.Env = forwardToChild(environment, names)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
@@ -895,7 +889,7 @@ func runWithEnv(command, environment []string) error {
 			return exitStatusError{exitErr.ExitCode()}
 		}
 		if errors.Is(err, exec.ErrNotFound) && len(command) == 1 && strings.ContainsAny(command[0], " \t") {
-			return fmt.Errorf("%w; jt runs the command directly, so a shell command needs an explicit shell: --exec cmd /C \"...\" or --exec bash -c '...'", err)
+			return fmt.Errorf("%w; jt runs the command directly, so a shell command needs an explicit shell: %s", err, shellHint)
 		}
 		return err
 	}
@@ -935,7 +929,7 @@ func initVault(args []string) error {
 	if err := saveConfig(c); err != nil {
 		return err
 	}
-	if _, err := loadKey(c.Key, true); err != nil {
+	if err := os.MkdirAll(filepath.Dir(c.Key), 0700); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(c.Vault, 0700); err != nil {
@@ -967,6 +961,25 @@ func initVault(args []string) error {
 	}
 	if _, err := os.Stat(filepath.Join(c.Vault, "vault.json")); errors.Is(err, os.ErrNotExist) {
 		if err := saveVault(c, vault{Version: 1, Secrets: []entry{}}); err != nil {
+			return err
+		}
+	}
+	// A key is minted only for a vault without ciphertext. A cloned or shared
+	// vault that already holds entries needs the key that encrypted them.
+	if _, err := os.Stat(c.Key); errors.Is(err, os.ErrNotExist) {
+		data, err := os.ReadFile(filepath.Join(c.Vault, "vault.json"))
+		if err != nil {
+			return err
+		}
+		var v vault
+		if err := json.Unmarshal(data, &v); err != nil {
+			return fmt.Errorf("read vault: %w", err)
+		}
+		if len(v.Secrets) > 0 {
+			fmt.Printf("initialized vault %s (%d entries)\nno key here yet: run `jt key export` where the vault was created, then `jt key import` on this side\n", c.Vault, len(v.Secrets))
+			return nil
+		}
+		if _, err := loadKey(c.Key, true); err != nil {
 			return err
 		}
 	}
