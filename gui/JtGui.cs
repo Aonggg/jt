@@ -220,10 +220,16 @@ namespace JtGui
     sealed class PromptForm : Form
     {
         readonly PromptField[] fields;
-        readonly CheckBox option;
+        readonly CheckBox[] options;
 
         public PromptForm(string title, PromptField[] fields, string optionText, bool optionChecked)
+            : this(title, fields, optionText == null ? new string[0] : new[] { optionText }, new[] { optionChecked })
         {
+        }
+
+        public PromptForm(string title, PromptField[] fields, string[] optionTexts, bool[] optionChecked)
+        {
+            options = new CheckBox[optionTexts.Length];
             this.fields = fields;
             Text = title;
             Font = SystemFonts.MessageBoxFont;
@@ -286,10 +292,10 @@ namespace JtGui
                     row++;
                 }
             }
-            if (optionText != null)
+            for (int i = 0; i < optionTexts.Length; i++)
             {
-                option = new CheckBox { Text = optionText, Checked = optionChecked, AutoSize = true, Margin = Dpi.Pad(0, 4, 0, 4) };
-                table.Controls.Add(option, 1, row);
+                options[i] = new CheckBox { Text = optionTexts[i], Checked = optionChecked[i], AutoSize = true, MaximumSize = new Size(Dpi.Px(380), 0), Margin = Dpi.Pad(0, 4, 0, 4) };
+                table.Controls.Add(options[i], 1, row);
                 row++;
             }
             var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Anchor = AnchorStyles.Right, Margin = Dpi.Pad(0, 8, 0, 0) };
@@ -304,7 +310,9 @@ namespace JtGui
             CancelButton = cancel;
         }
 
-        public bool OptionChecked { get { return option != null && option.Checked; } }
+        public bool OptionChecked { get { return Option(0); } }
+
+        public bool Option(int index) { return options.Length > index && options[index].Checked; }
 
         public string this[int index] { get { return fields[index].Box.Text; } }
     }
@@ -825,30 +833,8 @@ namespace JtGui
         // when the user asked to store the block whole instead.
         bool OrganizeAndStore(MaskResult masked)
         {
-            string ns = Split.LocalNamespace(masked);
-            List<SplitField> fields = Split.LocalFields(masked);
-            string note = "识别出 " + fields.Count + " 个值，按内置规则命名（托盘菜单 → AI 设置 可以接入 DeepSeek 自动整理）。请确认：";
-            string shown = null;
-            if (AiSettings.Enabled)
-            {
-                SetStatus("AI 正在整理…");
-                UseWaitCursor = true;
-                string error;
-                AiPlan plan = Ai.Organize(masked, out error);
-                UseWaitCursor = false;
-                shown = masked.Text;
-                if (plan != null)
-                {
-                    if (plan.Namespace.Length > 0) ns = plan.Namespace;
-                    if (plan.Fields.Count > 0) fields = plan.Fields;
-                    note = "AI（" + AiSettings.Model + "）整理了 " + fields.Count + " 条，请确认名称：";
-                }
-                else
-                {
-                    note = "AI 整理失败，已改用内置规则：" + error;
-                }
-            }
-            using (var dialog = new SplitForm(note, shown, ns, fields, Settings.ClearHistory))
+            // Local names first; the dialog itself offers AI naming after showing what would be sent.
+            using (var dialog = new SplitForm(masked, Split.LocalNamespace(masked), Split.LocalFields(masked), Settings.ClearHistory, AiSettings.Enabled, AiSettings.AutoSend))
             {
                 ShowDialogOnTop(dialog);
                 if (dialog.Result == SplitForm.Outcome.Cancel) return false;
@@ -888,7 +874,9 @@ namespace JtGui
             var model = new PromptField { Label = "模型", Value = AiSettings.Model, Ascii = true };
             var keyName = new PromptField { Label = "密钥在 jt 里的名称", Value = AiSettings.KeyName, Ascii = true, Hint = "API Key 本身存在 jt 里，和别的密钥一样加密、同步" };
             var key = new PromptField { Label = "API Key", Masked = true, Ascii = true, Hint = "留空表示沿用 jt 里已有的那条" };
-            using (var dialog = new PromptForm("AI 设置", new[] { url, model, keyName, key }, "启用 AI 整理（抓取剪贴板时自动拆分并命名；只发送标签和占位符，不发送值）", AiSettings.Enabled))
+            using (var dialog = new PromptForm("AI 设置", new[] { url, model, keyName, key },
+                new[] { "启用 AI 命名（只发送标签、占位符和值的长度/类型，发送前校验，真值不出本机）", "抓取时自动发送，不先停在预览（关掉则每次手动点“用 AI 命名”）" },
+                new[] { AiSettings.Enabled, AiSettings.AutoSend }))
             {
                 if (ShowDialogOnTop(dialog) != DialogResult.OK) return;
                 if (dialog[0].Trim().Length == 0 || dialog[1].Trim().Length == 0 || dialog[2].Trim().Length == 0)
@@ -916,8 +904,9 @@ namespace JtGui
                     }
                     Reload();
                 }
-                AiSettings.Enabled = dialog.OptionChecked;
-                if (!dialog.OptionChecked)
+                AiSettings.Enabled = dialog.Option(0);
+                AiSettings.AutoSend = dialog.Option(1);
+                if (!dialog.Option(0))
                 {
                     SetStatus("AI 整理已关闭");
                     return;

@@ -1,10 +1,11 @@
 // SplitForm shows how a pasted block will be split into named secrets and lets
-// the user fix names, drop rows, or fall back to storing the block whole.
-// C# 5 only.
+// the user fix names, drop rows, ask the AI to name them (after seeing exactly
+// what would be sent), or fall back to storing the block whole. C# 5 only.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace JtGui
@@ -16,14 +17,18 @@ namespace JtGui
         static readonly Regex EnvName = new Regex("^[A-Za-z_][A-Za-z0-9_]*$");
 
         public Outcome Result = Outcome.Cancel;
-        readonly List<SplitField> fields;
+        readonly MaskResult masked;
         readonly ValueBox ns = new ValueBox { ImeMode = ImeMode.Disable };
         readonly ListView grid = new ListView { View = View.Details, CheckBoxes = true, LabelEdit = true, FullRowSelect = true, HideSelection = false };
+        readonly Label note = new Label { AutoSize = true };
+        readonly Label aiStatus = new Label { AutoSize = true, ForeColor = SystemColors.GrayText };
+        readonly Button aiButton = new Button { Text = "用 AI 命名", AutoSize = true };
         readonly CheckBox clear;
+        readonly Button split;
 
-        public SplitForm(string note, string maskedText, string nsValue, List<SplitField> fields, bool clearHistory)
+        public SplitForm(MaskResult masked, string nsValue, List<SplitField> fields, bool clearHistory, bool aiAvailable, bool autoSend)
         {
-            this.fields = fields;
+            this.masked = masked;
             Text = "拆成多条密钥";
             Font = SystemFonts.MessageBoxFont;
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -36,7 +41,10 @@ namespace JtGui
             var table = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = Dpi.Pad(14, 12, 14, 10) };
             int width = Dpi.Px(820);
 
-            table.Controls.Add(new Label { Text = note, AutoSize = true, MaximumSize = new Size(width, 0), Margin = Dpi.Pad(0, 0, 0, 8) });
+            note.MaximumSize = new Size(width, 0);
+            note.Margin = Dpi.Pad(0, 0, 0, 8);
+            note.Text = "识别出 " + fields.Count + " 个值，已按内置规则命名。请确认名称：";
+            table.Controls.Add(note);
 
             var nsRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Dpi.Pad(0, 0, 0, 6) };
             nsRow.Controls.Add(new Label { Text = "命名空间", AutoSize = true, Margin = Dpi.Pad(0, 7, 8, 0) });
@@ -52,19 +60,33 @@ namespace JtGui
             grid.Columns.Add("值", Dpi.Px(130));
             grid.Columns.Add("原文标签", Dpi.Px(170));
             grid.Columns.Add("描述", width - Dpi.Px(250 + 130 + 170 + 8));
-            foreach (SplitField f in fields)
-            {
-                var item = new ListViewItem(new[] { f.Name, Preview(f.Value), f.Label, f.Description }) { Checked = f.Include, Tag = f };
-                grid.Items.Add(item);
-            }
             grid.Margin = Dpi.Pad(0, 0, 0, 6);
+            Fill(fields);
             table.Controls.Add(grid);
 
-            if (maskedText != null)
+            if (aiAvailable)
             {
-                table.Controls.Add(new Label { Text = "发给 AI 的内容（值已换成占位符，真值没有离开这台电脑）：", AutoSize = true, ForeColor = SystemColors.GrayText, Margin = Dpi.Pad(0, 4, 0, 2) });
-                var shown = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Width = width, Height = Dpi.Px(90), Text = maskedText.Replace("\n", "\r\n"), Margin = Dpi.Pad(0, 0, 0, 6) };
+                table.Controls.Add(new Label { Text = "用 AI 命名时发出去的只有下面这些：标签、占位符和值的长度/类型。真值不离开这台电脑。", AutoSize = true, ForeColor = SystemColors.GrayText, MaximumSize = new Size(width, 0), Margin = Dpi.Pad(0, 4, 0, 2) });
+                var shown = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Width = width, Height = Dpi.Px(90), Margin = Dpi.Pad(0, 0, 0, 4) };
+                shown.Text = (masked.Text + "\n\n" + Shapes()).Replace("\n", "\r\n");
                 table.Controls.Add(shown);
+                var aiRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Dpi.Pad(0, 0, 0, 6) };
+                aiButton.Text = "用 AI 命名（" + AiSettings.Model + "）";
+                aiButton.Click += delegate { RunAi(); };
+                aiRow.Controls.Add(aiButton);
+                aiStatus.Margin = Dpi.Pad(10, 7, 0, 0);
+                aiRow.Controls.Add(aiStatus);
+                table.Controls.Add(aiRow);
+                string offending;
+                if (!Split.IsSafeToSend(masked.Text, out offending))
+                {
+                    aiButton.Enabled = false;
+                    aiStatus.Text = "脱敏自检未通过，不会发送（可疑片段：" + offending + "）";
+                }
+                else if (autoSend)
+                {
+                    Shown += delegate { RunAi(); };
+                }
             }
 
             clear = new CheckBox { Text = "顺便清空 Windows 剪贴板历史 (Win+V)", Checked = clearHistory, AutoSize = true, Margin = Dpi.Pad(0, 2, 0, 6) };
@@ -73,7 +95,7 @@ namespace JtGui
             var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Anchor = AnchorStyles.Right, Width = width, Margin = Dpi.Pad(0, 6, 0, 0) };
             var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = true };
             var whole = new Button { Text = "整块存为一条", AutoSize = true };
-            var split = new Button { Text = "拆分存入", AutoSize = true };
+            split = new Button { Text = "拆分存入", AutoSize = true };
             whole.Click += delegate
             {
                 Result = Outcome.Whole;
@@ -98,6 +120,62 @@ namespace JtGui
             Controls.Add(table);
             AcceptButton = split;
             CancelButton = cancel;
+        }
+
+        string Shapes()
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (MaskedToken t in masked.Tokens)
+            {
+                sb.Append('<').Append(t.Placeholder).Append(">: ").Append(t.Shape).Append('\n');
+            }
+            return sb.ToString().TrimEnd('\n');
+        }
+
+        void Fill(List<SplitField> fields)
+        {
+            grid.BeginUpdate();
+            grid.Items.Clear();
+            foreach (SplitField f in fields)
+            {
+                grid.Items.Add(new ListViewItem(new[] { f.Name, Preview(f.Value), f.Label, f.Description }) { Checked = f.Include, Tag = f });
+            }
+            grid.EndUpdate();
+        }
+
+        // RunAi asks the model in the background and replaces the rows on success;
+        // the dialog stays usable and the local names stay on failure.
+        void RunAi()
+        {
+            if (!aiButton.Enabled) return;
+            aiButton.Enabled = false;
+            split.Enabled = false;
+            aiStatus.Text = "AI 正在整理…";
+            UseWaitCursor = true;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string error;
+                AiPlan plan = Ai.Organize(masked, out error);
+                try
+                {
+                    BeginInvoke(new Action(() =>
+                    {
+                        UseWaitCursor = false;
+                        split.Enabled = true;
+                        aiButton.Enabled = true;
+                        if (plan == null)
+                        {
+                            aiStatus.Text = "AI 失败，保留内置命名：" + error;
+                            return;
+                        }
+                        if (plan.Namespace.Length > 0) ns.Text = plan.Namespace;
+                        if (plan.Fields.Count > 0) Fill(plan.Fields);
+                        note.Text = "AI（" + AiSettings.Model + "）整理了 " + plan.Fields.Count + " 条，请确认名称：";
+                        aiStatus.Text = "已按 AI 的结果更新";
+                    }));
+                }
+                catch (InvalidOperationException) { } // dialog closed while the request was in flight
+            });
         }
 
         public string Namespace { get { return ns.Text.Trim(); } }
