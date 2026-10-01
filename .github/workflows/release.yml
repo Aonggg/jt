@@ -5,34 +5,40 @@ on:
 permissions:
   contents: write
 jobs:
-  release:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: darwin
-            goarch: arm64
-            asset: jt-darwin-arm64
-          - goos: linux
-            goarch: amd64
-            asset: jt-linux-amd64
-          - goos: linux
-            goarch: arm64
-            asset: jt-linux-arm64
+  test:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+  release:
+    needs: test
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       - name: Build
         env:
-          GOOS: ${{ matrix.goos }}
+          GOOS: windows
           GOARCH: ${{ matrix.goarch }}
-        run: go build -trimpath -ldflags '-s -w' -o '${{ matrix.asset }}' ./cmd/jt
-      - name: Checksums
-        run: sha256sum '${{ matrix.asset }}' > '${{ matrix.asset }}.sha256'
+        run: go build -trimpath -ldflags '-s -w' -o jt.exe ./cmd/jt
+      - name: Package
+        shell: pwsh
+        run: |
+          $asset = "jt-windows-${{ matrix.goarch }}.zip"
+          Compress-Archive -Path jt.exe -DestinationPath $asset
+          $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
+          "$hash  $asset" | Set-Content -NoNewline "$asset.sha256"
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            ${{ matrix.asset }}
-            ${{ matrix.asset }}.sha256
+            jt-windows-${{ matrix.goarch }}.zip
+            jt-windows-${{ matrix.goarch }}.zip.sha256

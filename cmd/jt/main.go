@@ -1,3 +1,9 @@
+//go:build windows
+
+// jt stores secrets AES-GCM encrypted in a Git-synced vault and hands them to
+// programs as jt://secret/<id> references, so an AI agent can use a credential
+// without the plaintext ever entering its context. This build is Windows-only:
+// the master key is DPAPI-protected and the clipboard is the capture channel.
 package main
 
 import (
@@ -13,16 +19,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
 )
 
 const (
-	version = "0.3.0"
+	version = "0.4.0"
 	prefix  = "jt://secret/"
 )
 
@@ -60,6 +66,14 @@ func main() {
 	switch os.Args[1] {
 	case "add":
 		err = add(os.Args[2:])
+	case "grab":
+		err = grab(os.Args[2:])
+	case "ref":
+		err = ref(os.Args[2:])
+	case "copy":
+		err = copyValue(os.Args[2:])
+	case "key":
+		err = keyCommand(os.Args[2:])
 	case "ls", "list":
 		err = list(os.Args[2:])
 	case "set":
@@ -96,16 +110,55 @@ func main() {
 	}
 }
 func usage() {
-	fmt.Print("jt - encrypted, syncable secret references\n\nUsage:\n  jt init [--repo URL] [--vault DIR] [--key FILE]\n  jt add <name> [--from-clipboard] [--id ID] [--description TEXT]\n  jt ls [--json] [query]\n  jt set <name-or-ref> [--from-clipboard] [--description TEXT]\n  jt describe <name-or-ref> <description>\n  jt rm <name-or-ref>\n  jt mv <name-or-ref> <new-name>\n  jt resolve <name-or-ref> [--env NAME] --exec COMMAND [ARGS...]\n  jt env <namespace> -- COMMAND [ARGS...]\n  jt sync\n  jt status [--json]\n\nValues for add/set are read from stdin unless --from-clipboard is used.\nresolve without --exec prints the value and is intended for controlled use only.\ndescribe edits only metadata; pass an empty string to clear the description.\nDescriptions are plaintext, synced metadata; never put secrets in them.\nThe first nonempty description upgrades the vault to v2; upgrade all clients first.\nls --json prints id, ref, name, description, preview and timestamps; never ciphertext.\nstatus reports local vault state (uncommitted changes, commits not pushed) without network access.\n")
+	fmt.Print(`jt - encrypted secret references for Windows
+
+Usage:
+  jt init [--repo URL] [--vault DIR] [--key FILE]
+  jt grab <name> [--id ID] [--description TEXT] [--clear-history]
+  jt add <name> [--from-clipboard] [--id ID] [--description TEXT]
+  jt ls [--json] [query]
+  jt set <name-or-ref> [--from-clipboard] [--description TEXT]
+  jt describe <name-or-ref> <description>
+  jt rm <name-or-ref>
+  jt mv <name-or-ref> <new-name>
+  jt ref <name-or-ref>
+  jt copy <name-or-ref>
+  jt resolve <name-or-ref> [--env NAME] --exec COMMAND [ARGS...]
+  jt env <namespace> -- COMMAND [ARGS...]
+  jt key export | import [KEY]
+  jt sync
+  jt status [--json]
+
+grab encrypts the clipboard text and replaces it with a jt://secret/<id> reference.
+add/set read the value from stdin unless --from-clipboard is used.
+ref copies a reference to the clipboard; copy puts the plaintext there for you,
+excluded from Windows clipboard history.
+resolve and env decrypt only into the environment of the child process and
+never print values; the command runs directly, name a shell (cmd /C, bash -c)
+when you need one. resolve uses JT_SECRET unless --env sets another name.
+key export puts the base64 master key on the clipboard; key import reads it.
+describe edits only metadata; pass an empty string to clear the description.
+Descriptions are plaintext, synced metadata; never put secrets in them.
+The first nonempty description upgrades the vault to v2; upgrade all clients first.
+ls --json prints id, ref, name, description, preview and timestamps; never ciphertext.
+status reports local vault state (uncommitted changes, commits not pushed) without network access.
+`)
 }
+
+// paths resolves config, vault and key locations. Everything defaults to
+// %LOCALAPPDATA%\jt: machine-local, so a roaming profile never carries the key.
 func paths() (string, string, string) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
-	}
 	base := os.Getenv("JT_HOME")
 	if base == "" {
-		base = filepath.Join(home, ".config", "jt")
+		local := os.Getenv("LOCALAPPDATA")
+		if local == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				home = "."
+			}
+			local = filepath.Join(home, "AppData", "Local")
+		}
+		base = filepath.Join(local, "jt")
 	}
 	vaultDir := os.Getenv("JT_VAULT_DIR")
 	if vaultDir == "" {
@@ -141,30 +194,7 @@ func saveConfig(c config) error {
 	if err != nil {
 		return err
 	}
-	return atomicWrite(configPath, data, 0600)
-}
-func loadKey(path string, create bool) ([]byte, error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) && create {
-		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-			return nil, err
-		}
-		data = make([]byte, 32)
-		if _, err := io.ReadFull(rand.Reader, data); err != nil {
-			return nil, err
-		}
-		if err := atomicWrite(path, data, 0600); err != nil {
-			return nil, err
-		}
-		err = nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if len(data) != 32 {
-		return nil, errors.New("key file must contain 32 bytes")
-	}
-	return data, nil
+	return atomicWrite(configPath, data)
 }
 func openVault(c config, create bool) (vault, []byte, error) {
 	key, err := loadKey(c.Key, create)
@@ -212,9 +242,12 @@ func saveVault(c config, v vault) error {
 	if err != nil {
 		return err
 	}
-	return atomicWrite(filepath.Join(c.Vault, "vault.json"), data, 0600)
+	return atomicWrite(filepath.Join(c.Vault, "vault.json"), data)
 }
-func atomicWrite(path string, data []byte, mode os.FileMode) error {
+
+// atomicWrite replaces path via a temp file in the same directory. The files
+// live under the user's profile, which Windows already restricts to that user.
+func atomicWrite(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
@@ -224,10 +257,6 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return err
-	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return err
@@ -299,43 +328,41 @@ func newID(existing map[string]bool) (string, error) {
 		}
 	}
 }
+
+// readValue takes the secret from the clipboard or stdin. One trailing line
+// break is dropped: echo, PowerShell pipes and copied terminal lines add one.
 func readValue(fromClipboard bool) (string, error) {
 	if fromClipboard {
-		for _, candidate := range []string{"pbpaste", "wl-paste", "xclip"} {
-			if _, err := exec.LookPath(candidate); err == nil {
-				var cmd *exec.Cmd
-				switch candidate {
-				case "pbpaste", "wl-paste":
-					cmd = exec.Command(candidate)
-				default:
-					cmd = exec.Command(candidate, "-selection", "clipboard", "-o")
-				}
-				out, err := cmd.Output()
-				if err != nil {
-					return "", err
-				}
-				return strings.TrimSuffix(string(out), "\n"), nil
-			}
+		text, err := readClipboard()
+		if err != nil {
+			return "", err
 		}
-		return "", errors.New("clipboard tool not found (pbpaste, wl-paste, or xclip)")
+		return trimLineEnd(text), nil
 	}
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSuffix(string(data), "\n"), nil
+	return trimLineEnd(string(data)), nil
+}
+func trimLineEnd(s string) string {
+	return strings.TrimSuffix(strings.TrimSuffix(s, "\n"), "\r")
 }
 
 type writeOptions struct {
 	fromClipboard bool
+	clearHistory  bool
 	id            string
 	description   *string // nil means leave the existing description unchanged.
 	positional    []string
 }
 
-// Flags may precede or follow positional arguments. Use -- to end flags, or
-// --description=TEXT for a description beginning with a dash.
-func parseWriteFlags(args []string, allowID bool) (writeOptions, error) {
+// parseWriteFlags recognises the boolean flags --from-clipboard and
+// --clear-history and the valued flags --id and --description, limited to the
+// ones listed in allowed. Flags may precede or follow positional arguments.
+// Use -- to end flags, or --description=TEXT for a description beginning with
+// a dash.
+func parseWriteFlags(args []string, allowed ...string) (writeOptions, error) {
 	var opts writeOptions
 	seen := map[string]bool{}
 	for i := 0; i < len(args); i++ {
@@ -349,18 +376,22 @@ func parseWriteFlags(args []string, allowID bool) (writeOptions, error) {
 			continue
 		}
 		name, value, hasValue := strings.Cut(arg, "=")
-		if name != "--from-clipboard" && name != "--description" && !(allowID && name == "--id") {
+		if !slices.Contains(allowed, name) {
 			return opts, fmt.Errorf("unknown option %q", name)
 		}
 		if seen[name] {
 			return opts, fmt.Errorf("duplicate option %s", name)
 		}
 		seen[name] = true
-		if name == "--from-clipboard" {
+		if name == "--from-clipboard" || name == "--clear-history" {
 			if hasValue {
-				return opts, errors.New("--from-clipboard does not take a value")
+				return opts, fmt.Errorf("%s does not take a value", name)
 			}
-			opts.fromClipboard = true
+			if name == "--from-clipboard" {
+				opts.fromClipboard = true
+			} else {
+				opts.clearHistory = true
+			}
 			continue
 		}
 		if !hasValue {
@@ -386,7 +417,7 @@ func parseWriteFlags(args []string, allowID bool) (writeOptions, error) {
 	return opts, nil
 }
 func add(args []string) error {
-	opts, err := parseWriteFlags(args, true)
+	opts, err := parseWriteFlags(args, "--from-clipboard", "--id", "--description")
 	if err != nil {
 		return err
 	}
@@ -406,12 +437,22 @@ func add(args []string) error {
 	if err != nil {
 		return err
 	}
+	item, err := addEntry(c, v, key, positional[0], value, opts)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("added %s %s\n", item.Name, prefix+item.ID)
+	return nil
+}
+
+// addEntry encrypts value as a new entry named name and saves the vault.
+func addEntry(c config, v vault, key []byte, name, value string, opts writeOptions) (entry, error) {
 	if value == "" {
-		return errors.New("refusing to add an empty value")
+		return entry{}, errors.New("refusing to add an empty value")
 	}
 	for _, item := range v.Secrets {
-		if item.Name == positional[0] {
-			return fmt.Errorf("name already exists: %s", positional[0])
+		if item.Name == name {
+			return entry{}, fmt.Errorf("name already exists: %s", name)
 		}
 	}
 	id := opts.id
@@ -420,34 +461,33 @@ func add(args []string) error {
 		for _, item := range v.Secrets {
 			ids[item.ID] = true
 		}
-		id, err = newID(ids)
-		if err != nil {
-			return err
+		var err error
+		if id, err = newID(ids); err != nil {
+			return entry{}, err
 		}
 	}
 	if !idPattern.MatchString(id) {
-		return errors.New("id must be 8 base62 characters")
+		return entry{}, errors.New("id must be 8 base62 characters")
 	}
 	for _, item := range v.Secrets {
 		if item.ID == id {
-			return fmt.Errorf("id already exists: %s", id)
+			return entry{}, fmt.Errorf("id already exists: %s", id)
 		}
 	}
 	ciphertext, err := seal(key, value)
 	if err != nil {
-		return err
+		return entry{}, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	item := entry{ID: id, Name: positional[0], Ciphertext: ciphertext, Preview: preview(value), CreatedAt: now, UpdatedAt: now}
+	item := entry{ID: id, Name: name, Ciphertext: ciphertext, Preview: preview(value), CreatedAt: now, UpdatedAt: now}
 	if opts.description != nil {
 		item.Description = *opts.description
 	}
 	v.Secrets = append(v.Secrets, item)
 	if err := saveVault(c, v); err != nil {
-		return err
+		return entry{}, err
 	}
-	fmt.Printf("added %s %s\n", positional[0], prefix+id)
-	return nil
+	return item, nil
 }
 
 type listItem struct {
@@ -544,7 +584,7 @@ func find(v vault, ref string) (int, *entry, error) {
 	return -1, nil, errors.New("secret not found")
 }
 func set(args []string) error {
-	opts, err := parseWriteFlags(args, false)
+	opts, err := parseWriteFlags(args, "--from-clipboard", "--description")
 	if err != nil {
 		return err
 	}
@@ -713,30 +753,12 @@ func resolve(args []string) error {
 		}
 	}
 	if len(command) == 0 {
-		fmt.Println(value)
-		return nil
+		return errors.New("resolve needs --exec COMMAND; jt never prints a secret value (use jt copy to put one on the clipboard for yourself)")
 	}
 	if !envPattern.MatchString(envName) {
 		return errors.New("invalid environment variable name")
 	}
-	var cmd *exec.Cmd
-	if len(command) == 1 {
-		cmd = exec.Command("/bin/sh", "-c", command[0])
-	} else {
-		cmd = exec.Command(command[0], command[1:]...)
-	}
-	cmd.Env = append(os.Environ(), envName+"="+value)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
-				return exitStatusError{status.ExitStatus()}
-			}
-		}
-		return err
-	}
-	return nil
+	return runWithEnv(command, append(os.Environ(), envName+"="+value))
 }
 
 type exitStatusError struct{ code int }
@@ -775,16 +797,23 @@ func env(args []string) error {
 	if injected == 0 {
 		return fmt.Errorf("no secrets found for namespace %q", namespace)
 	}
-	command := args[2:]
+	return runWithEnv(args[2:], environment)
+}
+
+// runWithEnv executes command directly with the given environment. jt never
+// starts a shell on its own: the caller names one (cmd /C, bash -c) when the
+// command needs shell syntax, so there is no guessing which shell expands $VAR.
+func runWithEnv(command, environment []string) error {
 	cmd := exec.Command(command[0], command[1:]...)
 	cmd.Env = environment
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
-				return exitStatusError{status.ExitStatus()}
-			}
+			return exitStatusError{exitErr.ExitCode()}
+		}
+		if errors.Is(err, exec.ErrNotFound) && len(command) == 1 && strings.ContainsAny(command[0], " \t") {
+			return fmt.Errorf("%w; jt runs the command directly, so a shell command needs an explicit shell: --exec cmd /C \"...\" or --exec bash -c '...'", err)
 		}
 		return err
 	}
@@ -830,22 +859,30 @@ func initVault(args []string) error {
 	if err := os.MkdirAll(c.Vault, 0700); err != nil {
 		return err
 	}
-	if _, err := os.Stat(filepath.Join(c.Vault, "vault.json")); errors.Is(err, os.ErrNotExist) {
-		if err := saveVault(c, vault{Version: 1, Secrets: []entry{}}); err != nil {
-			return err
-		}
-	}
 	if _, err := os.Stat(filepath.Join(c.Vault, ".git")); errors.Is(err, os.ErrNotExist) {
-		if err := runGit(c.Vault, "init"); err != nil {
-			return err
-		}
-		if repo != "" {
-			if err := runGit(c.Vault, "remote", "add", "origin", repo); err != nil {
+		if branch := remoteBranch(repo); branch != "" {
+			// The remote already holds a vault (another machine pushed it): clone it
+			// instead of starting an empty, unrelated history.
+			if err := runGit(".", "clone", "--branch", branch, repo, c.Vault); err != nil {
 				return err
+			}
+		} else {
+			if err := runGit(c.Vault, "init"); err != nil {
+				return err
+			}
+			if repo != "" {
+				if err := runGit(c.Vault, "remote", "add", "origin", repo); err != nil {
+					return err
+				}
 			}
 		}
 	} else if repo != "" {
 		_ = runGit(c.Vault, "remote", "set-url", "origin", repo)
+	}
+	if _, err := os.Stat(filepath.Join(c.Vault, "vault.json")); errors.Is(err, os.ErrNotExist) {
+		if err := saveVault(c, vault{Version: 1, Secrets: []entry{}}); err != nil {
+			return err
+		}
 	}
 	fmt.Printf("initialized vault %s\n", c.Vault)
 	return nil
@@ -857,10 +894,43 @@ func runGit(dir string, args ...string) error {
 	return cmd.Run()
 }
 func remoteHasHeads(dir string) bool {
-	cmd := exec.Command("git", "-C", dir, "ls-remote", "--exit-code", "--heads", "origin")
+	return gitSucceeds("-C", dir, "ls-remote", "--exit-code", "--heads", "origin")
+}
+
+// gitSucceeds runs git quietly and reports whether it exited 0.
+func gitSucceeds(args ...string) bool {
+	cmd := exec.Command("git", args...)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	return cmd.Run() == nil
+}
+
+// remoteBranch names the branch to check out from repo: the remote HEAD when it
+// points at an existing branch, otherwise the first branch listed. A bare repo
+// whose HEAD still says main while the vault was pushed as master falls into
+// the second case. Empty when the remote has no branches yet.
+func remoteBranch(repo string) string {
+	if repo == "" {
+		return ""
+	}
+	out, err := exec.Command("git", "ls-remote", "--symref", repo).Output()
+	if err != nil {
+		return ""
+	}
+	first := ""
+	for line := range strings.Lines(string(out)) {
+		target, name, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if !ok {
+			continue
+		}
+		if name == "HEAD" && strings.HasPrefix(target, "ref: refs/heads/") {
+			return strings.TrimPrefix(target, "ref: refs/heads/")
+		}
+		if branch, ok := strings.CutPrefix(name, "refs/heads/"); ok && first == "" {
+			first = branch
+		}
+	}
+	return first
 }
 
 func syncVault(args []string) error {
@@ -875,7 +945,16 @@ func syncVault(args []string) error {
 		return errors.New("vault is not a git repository; run jt init --repo URL")
 	}
 	if remoteHasHeads(c.Vault) {
-		if err := runGit(c.Vault, "pull", "--rebase", "--autostash", "origin"); err != nil {
+		pull := []string{"pull", "--rebase", "--autostash", "origin"}
+		// A vault created by init (not clone) has no upstream yet; name the branch explicitly.
+		if _, err := gitOutput(c.Vault, "rev-parse", "--verify", "--quiet", "@{upstream}"); err != nil {
+			branch, err := gitOutput(c.Vault, "symbolic-ref", "--short", "HEAD")
+			if err != nil {
+				return fmt.Errorf("cannot determine the current branch: %w", err)
+			}
+			pull = append(pull, branch)
+		}
+		if err := runGit(c.Vault, pull...); err != nil {
 			return err
 		}
 	}
@@ -888,7 +967,8 @@ func syncVault(args []string) error {
 			return err
 		}
 	}
-	return runGit(c.Vault, "push", "origin", "HEAD")
+	// -u records the upstream so later pulls and status work without extra setup.
+	return runGit(c.Vault, "push", "-u", "origin", "HEAD")
 }
 
 type vaultStatus struct {
