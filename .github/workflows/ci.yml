@@ -11,8 +11,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: gofmt -l ./cmd && if (gofmt -l ./cmd) { exit 1 }
+      - name: gofmt
         shell: pwsh
+        run: |
+          $unformatted = gofmt -l ./cmd
+          if ($unformatted) { Write-Host $unformatted; exit 1 }
       - run: go vet ./...
       - run: go test ./...
       - run: .\build.ps1
