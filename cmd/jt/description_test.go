@@ -1,3 +1,5 @@
+//go:build windows
+
 package main
 
 import (
@@ -49,15 +51,22 @@ func vaultBytes(t *testing.T, dir string) []byte {
 	return data
 }
 
+var (
+	addFlags  = []string{"--from-clipboard", "--id", "--description"}
+	setFlags  = []string{"--from-clipboard", "--description"}
+	grabFlags = []string{"--id", "--description", "--clear-history"}
+)
+
 func TestWriteDescriptionFlags(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		args        []string
-		allowID     bool
+		allowed     []string // nil means the set command's flags
 		description *string
 		positional  []string
 		id          string
 		clipboard   bool
+		clear       bool
 		wantErr     bool
 	}{
 		{name: "omitted", args: []string{"app/KEY"}, positional: []string{"app/KEY"}},
@@ -66,7 +75,11 @@ func TestWriteDescriptionFlags(t *testing.T) {
 		{name: "clear spaced", args: []string{"app/KEY", "--description", ""}, description: strptr(""), positional: []string{"app/KEY"}},
 		{name: "clear equals", args: []string{"--description=", "app/KEY"}, description: strptr(""), positional: []string{"app/KEY"}},
 		{name: "flag-like value", args: []string{"app/KEY", "--description=--from-clipboard"}, description: strptr("--from-clipboard"), positional: []string{"app/KEY"}},
-		{name: "mixed flags", allowID: true, args: []string{"--id=Abcd1234", "app/KEY", "--from-clipboard", "--description=one=two"}, description: strptr("one=two"), positional: []string{"app/KEY"}, id: "Abcd1234", clipboard: true},
+		{name: "mixed flags", allowed: addFlags, args: []string{"--id=Abcd1234", "app/KEY", "--from-clipboard", "--description=one=two"}, description: strptr("one=two"), positional: []string{"app/KEY"}, id: "Abcd1234", clipboard: true},
+		{name: "grab clear history", allowed: grabFlags, args: []string{"app/KEY", "--clear-history"}, positional: []string{"app/KEY"}, clear: true},
+		{name: "grab rejects clipboard flag", allowed: grabFlags, args: []string{"app/KEY", "--from-clipboard"}, wantErr: true},
+		{name: "add rejects clear history", allowed: addFlags, args: []string{"app/KEY", "--clear-history"}, wantErr: true},
+		{name: "clear history value", allowed: grabFlags, args: []string{"app/KEY", "--clear-history=yes"}, wantErr: true},
 		{name: "end flags", args: []string{"--description", "note", "--", "--name"}, description: strptr("note"), positional: []string{"--name"}},
 		{name: "missing value", args: []string{"app/KEY", "--description"}, wantErr: true},
 		{name: "missing before option", args: []string{"app/KEY", "--description", "--from-clipboard"}, wantErr: true},
@@ -74,20 +87,24 @@ func TestWriteDescriptionFlags(t *testing.T) {
 		{name: "duplicate clipboard", args: []string{"--from-clipboard", "--from-clipboard", "app/KEY"}, wantErr: true},
 		{name: "unknown flag", args: []string{"app/KEY", "--descripton=note"}, wantErr: true},
 		{name: "unsupported set id", args: []string{"app/KEY", "--id", "Abcd1234"}, wantErr: true},
-		{name: "invalid id", allowID: true, args: []string{"app/KEY", "--id="}, wantErr: true},
-		{name: "missing id", allowID: true, args: []string{"app/KEY", "--id"}, wantErr: true},
+		{name: "invalid id", allowed: addFlags, args: []string{"app/KEY", "--id="}, wantErr: true},
+		{name: "missing id", allowed: addFlags, args: []string{"app/KEY", "--id"}, wantErr: true},
 		{name: "clipboard value", args: []string{"app/KEY", "--from-clipboard=true"}, wantErr: true},
 		{name: "invalid UTF-8", args: []string{"app/KEY", "--description", string([]byte{0xff})}, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			opts, err := parseWriteFlags(tc.args, tc.allowID)
+			allowed := tc.allowed
+			if allowed == nil {
+				allowed = setFlags
+			}
+			opts, err := parseWriteFlags(tc.args, allowed...)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("error = %v, wantErr %v", err, tc.wantErr)
 			}
 			if tc.wantErr {
 				return
 			}
-			if !reflect.DeepEqual(opts.description, tc.description) || !reflect.DeepEqual(opts.positional, tc.positional) || opts.id != tc.id || opts.fromClipboard != tc.clipboard {
+			if !reflect.DeepEqual(opts.description, tc.description) || !reflect.DeepEqual(opts.positional, tc.positional) || opts.id != tc.id || opts.fromClipboard != tc.clipboard || opts.clearHistory != tc.clear {
 				t.Fatalf("unexpected options: %+v", opts)
 			}
 		})
@@ -377,10 +394,11 @@ func TestDescriptionsDoNotChangeSecretConsumption(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("INJECTED", "")
-	if err := env([]string{"app", "--", "sh", "-c", `test "$KEY" = fixture-value && test -z "$INJECTED"`}); err != nil {
+	t.Setenv("JT_TEST_HELPER", "1")
+	if err := env([]string{"app", "--", os.Args[0], "-test.run=^TestHelperProcess$", "--", "KEY", "fixture-value"}); err != nil {
 		t.Fatalf("env changed value or injected metadata: %v", err)
 	}
-	if err := resolve([]string{"app/KEY", "--exec", "sh", "-c", `test "$JT_SECRET" = fixture-value && test -z "$INJECTED"`}); err != nil {
+	if err := resolve([]string{"app/KEY", "--exec", os.Args[0], "-test.run=^TestHelperProcess$", "--", "JT_SECRET", "fixture-value"}); err != nil {
 		t.Fatalf("resolve changed value or injected metadata: %v", err)
 	}
 }
