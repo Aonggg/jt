@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	version = "0.5.3"
+	version = "0.5.5"
 	prefix  = "jt://secret/"
 	// groupPrefix names a whole namespace: jt://env/cf stands for every cf/* entry.
 	groupPrefix = "jt://env/"
