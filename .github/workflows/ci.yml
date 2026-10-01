@@ -15,4 +15,5 @@ jobs:
         shell: pwsh
       - run: go vet ./...
       - run: go test ./...
-      - run: go build -trimpath -ldflags '-s -w' -o jt.exe ./cmd/jt
+      - run: .\build.ps1
+        shell: pwsh

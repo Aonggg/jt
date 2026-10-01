@@ -1,5 +1,6 @@
-# Installs the latest jt release for Windows into %LOCALAPPDATA%\Programs\jt
-# and adds that folder to the user PATH.
+# Installs the latest jt release for Windows (jt.exe and jt-gui.exe) into
+# %LOCALAPPDATA%\Programs\jt, adds that folder to the user PATH and creates a
+# Start Menu shortcut for the GUI.
 #
 #   irm https://raw.githubusercontent.com/catoncat/jt/main/install.ps1 | iex
 #
@@ -35,6 +36,18 @@ try {
     Expand-Archive -Path $zip -DestinationPath $tmp -Force
     New-Item -ItemType Directory -Path $dest -Force | Out-Null
     Copy-Item (Join-Path $tmp 'jt.exe') (Join-Path $dest 'jt.exe') -Force
+    $gui = Join-Path $tmp 'jt-gui.exe'
+    if (Test-Path $gui) {
+        # A running jt-gui would keep its exe locked; stop it before overwriting.
+        Get-Process jt-gui -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $dest 'jt-gui.exe') } | Stop-Process -Force
+        Copy-Item $gui (Join-Path $dest 'jt-gui.exe') -Force
+        $programs = [Environment]::GetFolderPath('Programs')
+        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $programs 'jt.lnk'))
+        $shortcut.TargetPath = Join-Path $dest 'jt-gui.exe'
+        $shortcut.WorkingDirectory = $dest
+        $shortcut.Description = 'jt - secret references (Ctrl+Shift+J)'
+        $shortcut.Save()
+    }
 
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if (($userPath -split ';') -notcontains $dest) {
@@ -43,6 +56,9 @@ try {
         Write-Host "added $dest to the user PATH; open a new terminal for other windows to see it"
     }
     Write-Host "installed $(& (Join-Path $dest 'jt.exe') version) to $dest\jt.exe"
+    if (Test-Path (Join-Path $dest 'jt-gui.exe')) {
+        Write-Host "installed jt-gui.exe; find 'jt' in the Start menu, then press Ctrl+Shift+J"
+    }
 } finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
