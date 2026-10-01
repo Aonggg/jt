@@ -35,11 +35,10 @@ Copy-Item bin\jt.exe, bin\jt-gui.exe "$env:LOCALAPPDATA\Programs\jt\"
 # 把 %LOCALAPPDATA%\Programs\jt 加入用户 PATH；jt-gui.exe 可以固定到任务栏或开始菜单
 ```
 
-发布包：把这个仓库推到你自己的 GitHub 账号并打一个 `v*` 标签，release 工作流会在 Windows runner 上跑测试并产出 `jt-windows-amd64.zip` / `jt-windows-arm64.zip`（各含 `jt.exe` 和 `jt-gui.exe`）和 sha256。然后：
+发布包：推送 `v*` 标签后，release 工作流在 Windows runner 上跑测试并产出 `jt-windows-amd64.zip` / `jt-windows-arm64.zip`（各含 `jt.exe` 和 `jt-gui.exe`）和 sha256，见 [Releases](https://github.com/Aonggg/jt/releases)。一行安装：
 
 ```powershell
-$env:JT_REPO = '<you>/jt'
-irm https://raw.githubusercontent.com/<you>/jt/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Aonggg/jt/main/install.ps1 | iex
 ```
 
 安装脚本校验 sha256，安装到 `%LOCALAPPDATA%\Programs\jt\jt.exe` 并加入用户 PATH。环境变量 `JT_REPO`、`JT_VERSION`、`JT_INSTALL_DIR`、`JT_BASE_URL` 可以覆盖来源和位置。原仓库 catoncat/jt 的 release 只有 macOS / Linux 产物，不能用于这个版本。
@@ -48,7 +47,7 @@ irm https://raw.githubusercontent.com/<you>/jt/main/install.ps1 | iex
 
 ```powershell
 gh repo create jt-vault --private          # 或在 GitHub 网页上建一个私有仓库
-jt init --repo https://github.com/<you>/jt-vault.git
+jt init --repo https://github.com/Aonggg/jt-vault.git
 jt sync
 ```
 

@@ -2,14 +2,14 @@
 # %LOCALAPPDATA%\Programs\jt, adds that folder to the user PATH and creates a
 # Start Menu shortcut for the GUI.
 #
-#   irm https://raw.githubusercontent.com/catoncat/jt/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/Aonggg/jt/main/install.ps1 | iex
 #
 # Environment overrides: JT_REPO (owner/name), JT_VERSION (tag, default latest),
 # JT_INSTALL_DIR (folder for jt.exe), JT_BASE_URL (download the assets from
 # another location, e.g. a mirror or a local build).
 $ErrorActionPreference = 'Stop'
 
-$repo = if ($env:JT_REPO) { $env:JT_REPO } else { 'catoncat/jt' }
+$repo = if ($env:JT_REPO) { $env:JT_REPO } else { 'Aonggg/jt' }
 $version = if ($env:JT_VERSION) { $env:JT_VERSION } else { 'latest' }
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
 $asset = "jt-windows-$arch.zip"
