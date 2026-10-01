@@ -16,9 +16,25 @@ namespace JtGui
 {
     static class Program
     {
+        // PrintEnvFlag turns this exe into the child of `jt resolve --exec`: it
+        // writes the named variable to stdout as raw UTF-8 so the GUI can show the
+        // current value in the update dialog. jt itself still never prints.
+        public const string PrintEnvFlag = "--print-env";
+
         [STAThread]
-        static void Main(string[] args)
+        static int Main(string[] args)
         {
+            if (args.Length == 2 && args[0] == PrintEnvFlag)
+            {
+                string value = Environment.GetEnvironmentVariable(args[1]);
+                if (value == null) return 3;
+                byte[] bytes = System.Text.Encoding.UTF8.GetBytes(value);
+                using (var stdout = Console.OpenStandardOutput())
+                {
+                    stdout.Write(bytes, 0, bytes.Length);
+                }
+                return 0;
+            }
             bool tray = Array.IndexOf(args, "--tray") >= 0;
             bool created;
             using (var mutex = new Mutex(true, @"Local\jt-gui", out created))
@@ -28,13 +44,14 @@ namespace JtGui
                 {
                     // Already running: a plain launch brings the panel forward, an autostart launch stays quiet.
                     if (!tray) show.Set();
-                    return;
+                    return 0;
                 }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.Run(new MainForm(tray, show));
                 GC.KeepAlive(mutex);
             }
+            return 0;
         }
     }
 
@@ -91,6 +108,7 @@ namespace JtGui
     {
         public string Label = "", Value = "", Hint = "";
         public bool Masked;
+        public bool Multiline; // for values that contain line breaks; cannot be masked
         public bool Ascii; // names and tokens: IME disabled so pinyin never intercepts
         public TextBox Box;
     }
@@ -159,14 +177,27 @@ namespace JtGui
             int row = 0;
             foreach (PromptField field in fields)
             {
-                var label = new Label { Text = field.Label, AutoSize = true, Anchor = AnchorStyles.Left, Margin = Dpi.Pad(0, 7, 10, 4) };
-                var box = new TextBox { Width = Dpi.Px(380), Text = field.Value, UseSystemPasswordChar = field.Masked, Margin = Dpi.Pad(0, 4, 0, 4) };
+                var label = new Label { Text = field.Label, AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Top, Margin = Dpi.Pad(0, 7, 10, 4) };
+                var box = new TextBox { Width = Dpi.Px(380), Margin = Dpi.Pad(0, 4, 0, 4) };
+                if (field.Multiline)
+                {
+                    // A multi-line value (certificate, key file) cannot be masked; Enter inserts a line break.
+                    box.Multiline = true;
+                    box.AcceptsReturn = true;
+                    box.ScrollBars = ScrollBars.Vertical;
+                    box.Height = Dpi.Px(120);
+                }
+                else
+                {
+                    box.UseSystemPasswordChar = field.Masked;
+                }
+                box.Text = field.Value;
                 if (field.Ascii) box.ImeMode = ImeMode.Disable;
                 field.Box = box;
                 table.Controls.Add(label, 0, row);
                 table.Controls.Add(box, 1, row);
                 row++;
-                if (field.Masked)
+                if (field.Masked && !field.Multiline)
                 {
                     var show = new CheckBox { Text = "显示", AutoSize = true, Margin = Dpi.Pad(0, 0, 0, 4) };
                     TextBox target = box;
@@ -289,7 +320,7 @@ namespace JtGui
             bar.Items.Add(new ToolStripSeparator());
             bar.Items.Add(Button("改名", "F2", (s, e) => Rename()));
             bar.Items.Add(Button("描述", "改描述；留空清除", (s, e) => Describe()));
-            bar.Items.Add(Button("更新值", "换掉真值，引用不变", (s, e) => SetValue()));
+            bar.Items.Add(Button("查看/更新值", "看当前值（默认遮住，可点“显示”），改了就更新；引用不变", (s, e) => SetValue()));
             bar.Items.Add(Button("删除", "Delete", (s, e) => Delete()));
             bar.Items.Add(new ToolStripSeparator());
             bar.Items.Add(Button("同步", "jt sync：拉取、提交、推送", (s, e) => Sync()));
@@ -362,7 +393,7 @@ namespace JtGui
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("改名…", null, (s, e) => Rename());
             menu.Items.Add("描述…", null, (s, e) => Describe());
-            menu.Items.Add("更新值…", null, (s, e) => SetValue());
+            menu.Items.Add("查看 / 更新值…", null, (s, e) => SetValue());
             menu.Items.Add("删除", null, (s, e) => Delete());
             list.ContextMenuStrip = menu;
             Controls.Add(list);
@@ -724,20 +755,45 @@ namespace JtGui
             args.Add("--description=" + description);
         }
 
+        // SetValue shows the current value (masked, with a "show" toggle) so it can
+        // be inspected or edited in place. The value reaches the GUI the only way
+        // jt hands values out: injected into a child process, which here is this
+        // same exe in --print-env mode.
         void SetValue()
         {
             Secret s = Selected();
             if (s == null) return;
-            var value = new PromptField { Label = "新值", Masked = true, Ascii = true, Hint = s.Name + " 的引用 " + s.Ref + " 保持不变" };
-            using (var dialog = new PromptForm("更新值", new[] { value }, null, false))
+            JtResult current = Jt.Run(new[] { "resolve", s.Ref, "--exec", Application.ExecutablePath, Program.PrintEnvFlag, "JT_SECRET" }, null);
+            if (!current.Ok)
+            {
+                Fail("读取当前值失败", current);
+                return;
+            }
+            string before = current.Stdout;
+            var value = new PromptField
+            {
+                Label = "值",
+                Value = before,
+                Masked = true,
+                Multiline = before.IndexOf('\n') >= 0,
+                Ascii = true,
+                Hint = s.Name + " 的引用 " + s.Ref + " 保持不变；改完确定即更新",
+            };
+            using (var dialog = new PromptForm("查看 / 更新值 " + s.Name, new[] { value }, null, false))
             {
                 if (ShowDialogOnTop(dialog) != DialogResult.OK) return;
-                if (dialog[0].Length == 0)
+                string after = dialog[0];
+                if (after.Length == 0)
                 {
                     SetStatus("值不能为空");
                     return;
                 }
-                JtResult r = Jt.Run(new[] { "set", s.Ref }, dialog[0]);
+                if (after == before)
+                {
+                    SetStatus("值没有变化");
+                    return;
+                }
+                JtResult r = Jt.Run(new[] { "set", s.Ref }, after);
                 if (!r.Ok)
                 {
                     Fail("更新失败", r);
