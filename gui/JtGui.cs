@@ -108,9 +108,55 @@ namespace JtGui
     {
         public string Label = "", Value = "", Hint = "";
         public bool Masked;
-        public bool Multiline; // for values that contain line breaks; cannot be masked
         public bool Ascii; // names and tokens: IME disabled so pinyin never intercepts
         public TextBox Box;
+    }
+
+    // ValueBox is a TextBox that turns itself multi-line when multi-line text is
+    // pasted or when asked, so a block of several lines never silently loses
+    // everything after the first line in a single-line, masked field.
+    sealed class ValueBox : TextBox
+    {
+        const int WM_PASTE = 0x0302;
+
+        public event EventHandler BecameMultiline;
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_PASTE && !Multiline && ClipboardHasLineBreak())
+            {
+                // Multiline recreates the handle; paste again into the new one.
+                MakeMultiline();
+                Paste();
+                return;
+            }
+            base.WndProc(ref m);
+        }
+
+        static bool ClipboardHasLineBreak()
+        {
+            try
+            {
+                return Clipboard.ContainsText() && Clipboard.GetText().IndexOf('\n') >= 0;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        // MakeMultiline is one-way: a multi-line value cannot be masked, Enter
+        // inserts a line break, and the dialog's OK button is reached with Tab.
+        public void MakeMultiline()
+        {
+            if (Multiline) return;
+            UseSystemPasswordChar = false;
+            Multiline = true;
+            AcceptsReturn = true;
+            ScrollBars = ScrollBars.Vertical;
+            Height = Dpi.Px(120);
+            if (BecameMultiline != null) BecameMultiline(this, EventArgs.Empty);
+        }
     }
 
     // Dpi scales 96-dpi pixel literals to the system DPI. The process is DPI
@@ -178,33 +224,38 @@ namespace JtGui
             foreach (PromptField field in fields)
             {
                 var label = new Label { Text = field.Label, AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Top, Margin = Dpi.Pad(0, 7, 10, 4) };
-                var box = new TextBox { Width = Dpi.Px(380), Margin = Dpi.Pad(0, 4, 0, 4) };
-                if (field.Multiline)
-                {
-                    // A multi-line value (certificate, key file) cannot be masked; Enter inserts a line break.
-                    box.Multiline = true;
-                    box.AcceptsReturn = true;
-                    box.ScrollBars = ScrollBars.Vertical;
-                    box.Height = Dpi.Px(120);
-                }
-                else
-                {
-                    box.UseSystemPasswordChar = field.Masked;
-                }
-                box.Text = field.Value;
+                var box = new ValueBox { Width = Dpi.Px(380), Margin = Dpi.Pad(0, 4, 0, 4), UseSystemPasswordChar = field.Masked };
                 if (field.Ascii) box.ImeMode = ImeMode.Disable;
                 field.Box = box;
                 table.Controls.Add(label, 0, row);
                 table.Controls.Add(box, 1, row);
                 row++;
-                if (field.Masked && !field.Multiline)
+                if (field.Masked)
                 {
-                    var show = new CheckBox { Text = "显示", AutoSize = true, Margin = Dpi.Pad(0, 0, 0, 4) };
-                    TextBox target = box;
-                    show.CheckedChanged += (s, e) => target.UseSystemPasswordChar = !show.Checked;
-                    table.Controls.Add(show, 1, row);
+                    var toggles = new FlowLayoutPanel { AutoSize = true, Margin = Dpi.Pad(0, 0, 0, 4), WrapContents = false };
+                    var show = new CheckBox { Text = "显示", AutoSize = true };
+                    var multi = new CheckBox { Text = "多行", AutoSize = true, Margin = Dpi.Pad(12, 3, 3, 3) };
+                    ValueBox target = box;
+                    show.CheckedChanged += (s, e) => target.UseSystemPasswordChar = !show.Checked && !target.Multiline;
+                    multi.CheckedChanged += (s, e) =>
+                    {
+                        if (multi.Checked) target.MakeMultiline();
+                    };
+                    // Multi-line text cannot be masked: once the box grows, "show" is forced on.
+                    box.BecameMultiline += delegate
+                    {
+                        show.Checked = true;
+                        show.Enabled = false;
+                        multi.Checked = true;
+                        multi.Enabled = false;
+                    };
+                    toggles.Controls.Add(show);
+                    toggles.Controls.Add(multi);
+                    table.Controls.Add(toggles, 1, row);
                     row++;
                 }
+                if (field.Value.IndexOf('\n') >= 0) box.MakeMultiline();
+                box.Text = field.Value;
                 if (field.Hint.Length > 0)
                 {
                     var hint = new Label { Text = field.Hint, AutoSize = true, ForeColor = SystemColors.GrayText, MaximumSize = new Size(Dpi.Px(380), 0), Margin = Dpi.Pad(0, 0, 0, 6) };
@@ -775,9 +826,8 @@ namespace JtGui
                 Label = "值",
                 Value = before,
                 Masked = true,
-                Multiline = before.IndexOf('\n') >= 0,
                 Ascii = true,
-                Hint = s.Name + " 的引用 " + s.Ref + " 保持不变；改完确定即更新",
+                Hint = s.Name + " 的引用 " + s.Ref + " 保持不变；改完确定即更新。粘贴多行内容会自动变成多行框。",
             };
             using (var dialog = new PromptForm("查看 / 更新值 " + s.Name, new[] { value }, null, false))
             {
