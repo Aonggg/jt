@@ -44,6 +44,13 @@ namespace JtGui
             set { Write("AiEnabled", value ? "1" : "0"); }
         }
 
+        // AutoSend skips the per-paste preview: the masked text goes to the model as soon as the dialog opens.
+        public static bool AutoSend
+        {
+            get { return Read("AiAutoSend", "0") == "1"; }
+            set { Write("AiAutoSend", value ? "1" : "0"); }
+        }
+
         static string Read(string name, string fallback)
         {
             using (RegistryKey k = Registry.CurrentUser.OpenSubKey(Key))
@@ -84,6 +91,13 @@ namespace JtGui
         // Organize returns the model's naming for every token, or null with error.
         public static AiPlan Organize(MaskResult masked, out string error)
         {
+            // Defence in depth: whatever Mask produced, nothing outside the safe grammar leaves.
+            string offending;
+            if (!Split.IsSafeToSend(masked.Text, out offending))
+            {
+                error = "脱敏自检未通过，没有发送（可疑片段：" + offending + "）";
+                return null;
+            }
             string key = ApiKey(out error);
             if (key == null) return null;
             var shapes = new StringBuilder();
