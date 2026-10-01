@@ -215,8 +215,73 @@ namespace JtGui
         }
     }
 
+    // GroupListView makes group headers behave like Explorer's: clicking one
+    // selects the group, right-clicking opens the context menu for it,
+    // double-clicking raises GroupActivated. The native control would otherwise
+    // start a rubber-band selection on the header and clear the selection.
+    sealed class GroupListView : ListView
+    {
+        const int WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_LBUTTONDBLCLK = 0x0203, WM_RBUTTONDOWN = 0x0204, WM_RBUTTONUP = 0x0205;
+        bool swallowUp; // the button-up that follows a header click must not reach the native control either
+
+        public event EventHandler GroupActivated;
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_LBUTTONDOWN || m.Msg == WM_LBUTTONDBLCLK || m.Msg == WM_RBUTTONDOWN)
+            {
+                int packed = unchecked((int)(long)m.LParam);
+                int x = (short)(packed & 0xFFFF), y = (short)((packed >> 16) & 0xFFFF);
+                ListViewGroup group = GroupAt(x, y);
+                if (group != null)
+                {
+                    Focus();
+                    SelectGroup(group);
+                    swallowUp = true;
+                    if (m.Msg == WM_RBUTTONDOWN)
+                    {
+                        if (ContextMenuStrip != null) ContextMenuStrip.Show(this, new Point(x, y));
+                    }
+                    else if (m.Msg == WM_LBUTTONDBLCLK && GroupActivated != null)
+                    {
+                        GroupActivated(this, EventArgs.Empty);
+                    }
+                    return;
+                }
+            }
+            if ((m.Msg == WM_LBUTTONUP || m.Msg == WM_RBUTTONUP) && swallowUp)
+            {
+                swallowUp = false;
+                return;
+            }
+            base.WndProc(ref m);
+        }
+
+        // GroupAt finds the group whose header (or the gap above its first row) is at
+        // the point: the nearest row below the point belongs to it.
+        public ListViewGroup GroupAt(int x, int y)
+        {
+            if (GetItemAt(x, y) != null) return null;
+            ListViewItem below = null;
+            foreach (ListViewItem item in Items)
+            {
+                if (item.Bounds.Top > y && (below == null || item.Bounds.Top < below.Bounds.Top)) below = item;
+            }
+            return below == null ? null : below.Group;
+        }
+
+        public void SelectGroup(ListViewGroup group)
+        {
+            BeginUpdate();
+            SelectedItems.Clear();
+            foreach (ListViewItem item in group.Items) item.Selected = true;
+            EndUpdate();
+            if (group.Items.Count > 0) FocusedItem = group.Items[0];
+        }
+    }
+
     // PromptForm is the one dialog for every text input: labelled fields, an
-    // optional masked field with a "show" toggle, and an optional checkbox.
+    // optional masked field with a "show" toggle, and optional checkboxes.
     sealed class PromptForm : Form
     {
         readonly PromptField[] fields;
@@ -334,7 +399,7 @@ namespace JtGui
         readonly bool startHidden;
         bool shownOnce, exiting;
         readonly TextBox search = new TextBox();
-        readonly ListView list = new ListView();
+        readonly GroupListView list = new GroupListView();
         readonly ToolStripStatusLabel status = new ToolStripStatusLabel();
         readonly NotifyIcon tray = new NotifyIcon();
         readonly ToolStripMenuItem autostart = new ToolStripMenuItem("开机自动启动到托盘");
@@ -440,7 +505,7 @@ namespace JtGui
                 }
                 else if (e.KeyCode == Keys.Enter)
                 {
-                    CopyReference(true);
+                    CopySelection(true);
                     e.Handled = e.SuppressKeyPress = true;
                 }
             };
@@ -455,7 +520,7 @@ namespace JtGui
             list.ShowGroups = true;
             list.FullRowSelect = true;
             list.HideSelection = false;
-            list.MultiSelect = false;
+            list.MultiSelect = true;
             list.ShowItemToolTips = true;
             list.BorderStyle = BorderStyle.None;
             list.Dock = DockStyle.Fill;
@@ -464,24 +529,36 @@ namespace JtGui
             list.Columns.Add("预览", Dpi.Px(140));
             list.Columns.Add("描述", Dpi.Px(240));
             list.Columns.Add("更新时间", Dpi.Px(130));
-            list.DoubleClick += delegate { CopyReference(true); };
+            list.DoubleClick += delegate { CopySelection(true); };
             list.KeyDown += (s, e) =>
             {
                 if (e.KeyCode == Keys.Enter)
                 {
-                    CopyReference(true);
+                    CopySelection(true);
                     e.Handled = e.SuppressKeyPress = true;
                 }
             };
+            // Double-clicking a group header copies the whole group and hides the panel.
+            list.GroupActivated += delegate { CopySelection(true); };
             var menu = new ContextMenuStrip();
-            menu.Items.Add("复制引用", null, (s, e) => CopyReference(false));
-            menu.Items.Add("复制整组引用", null, (s, e) => CopyGroup(false));
+            var copyRefs = menu.Items.Add("复制引用", null, (s, e) => CopySelection(false));
+            var copyGroup = menu.Items.Add("复制整组引用", null, (s, e) => CopyGroup(false));
             menu.Items.Add("复制明文", null, (s, e) => CopyValue());
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("改名…", null, (s, e) => Rename());
             menu.Items.Add("描述…", null, (s, e) => Describe());
             menu.Items.Add("查看 / 更新值…", null, (s, e) => SetValue());
-            menu.Items.Add("删除", null, (s, e) => Delete());
+            var remove = menu.Items.Add("删除", null, (s, e) => Delete());
+            menu.Opening += (s, e) =>
+            {
+                int count = list.SelectedItems.Count;
+                e.Cancel = count == 0;
+                Secret first = Selected();
+                copyRefs.Text = count > 1 ? "复制选中的 " + count + " 条引用" : "复制引用";
+                copyGroup.Text = first != null && first.Namespace.Length > 0 ? "复制整组引用（" + first.Namespace + "）" : "复制整组引用";
+                copyGroup.Enabled = first != null && first.Namespace.Length > 0;
+                remove.Text = count > 1 ? "删除选中的 " + count + " 条" : "删除";
+            };
             list.ContextMenuStrip = menu;
             Controls.Add(list);
         }
@@ -601,7 +678,7 @@ namespace JtGui
                 case Keys.Control | Keys.C:
                     if (!search.Focused || search.SelectionLength == 0)
                     {
-                        CopyReference(false);
+                        CopySelection(false);
                         return true;
                     }
                     break;
@@ -746,9 +823,64 @@ namespace JtGui
             return hint;
         }
 
+        // Selected is the row actions act on: the focused row when several are selected.
         Secret Selected()
         {
-            return list.SelectedItems.Count == 0 ? null : (Secret)list.SelectedItems[0].Tag;
+            if (list.SelectedItems.Count == 0) return null;
+            if (list.FocusedItem != null && list.FocusedItem.Selected) return (Secret)list.FocusedItem.Tag;
+            return (Secret)list.SelectedItems[0].Tag;
+        }
+
+        List<Secret> SelectedAll()
+        {
+            var all = new List<Secret>();
+            foreach (ListViewItem item in list.SelectedItems) all.Add((Secret)item.Tag);
+            return all;
+        }
+
+        // CopySelection copies one reference, or the selected rows as "name  reference"
+        // lines in the jt ref <namespace> format, with the jt://env/<ns> token for
+        // every group that is selected completely.
+        void CopySelection(bool hideAfter)
+        {
+            List<Secret> chosen = SelectedAll();
+            if (chosen.Count == 0) return;
+            if (chosen.Count == 1)
+            {
+                CopyReference(hideAfter);
+                return;
+            }
+            var sb = new System.Text.StringBuilder();
+            var done = new HashSet<string>();
+            foreach (Secret s in chosen)
+            {
+                string ns = s.Namespace;
+                if (ns.Length > 0 && done.Add(ns))
+                {
+                    int inGroup = 0, picked = 0;
+                    foreach (Secret other in secrets)
+                    {
+                        if (other.Namespace == ns) inGroup++;
+                    }
+                    foreach (Secret other in chosen)
+                    {
+                        if (other.Namespace == ns) picked++;
+                    }
+                    if (picked == inGroup) sb.Append("jt://env/").Append(ns).Append("  （整组注入：jt env ").Append(ns).Append(" -- <命令>）\n");
+                }
+                sb.Append(s.Name).Append("  ").Append(s.Ref).Append('\n');
+            }
+            try
+            {
+                Clipboard.SetText(sb.ToString());
+            }
+            catch (Exception e)
+            {
+                SetStatus("写剪贴板失败：" + e.Message);
+                return;
+            }
+            Notify("已复制 " + chosen.Count + " 条引用", chosen[0].Name + " …");
+            if (hideAfter) Hide();
         }
 
         void Select(string reference)
@@ -757,7 +889,9 @@ namespace JtGui
             {
                 if (((Secret)item.Tag).Ref == reference)
                 {
+                    list.SelectedItems.Clear();
                     item.Selected = true;
+                    list.FocusedItem = item;
                     item.EnsureVisible();
                     return;
                 }
@@ -767,9 +901,11 @@ namespace JtGui
         void MoveSelection(int delta)
         {
             if (list.Items.Count == 0) return;
-            int index = list.SelectedIndices.Count == 0 ? -1 : list.SelectedIndices[0];
+            int index = list.FocusedItem != null && list.FocusedItem.Selected ? list.FocusedItem.Index : (list.SelectedIndices.Count == 0 ? -1 : list.SelectedIndices[0]);
             index = Math.Max(0, Math.Min(list.Items.Count - 1, index + delta));
+            list.SelectedItems.Clear();
             list.Items[index].Selected = true;
+            list.FocusedItem = list.Items[index];
             list.Items[index].EnsureVisible();
         }
 
@@ -1092,17 +1228,24 @@ namespace JtGui
             }
         }
 
+        // Delete removes every selected row (a whole group when its header was clicked).
         void Delete()
         {
-            Secret s = Selected();
-            if (s == null) return;
-            DialogResult answer = MessageBox.Show(this, "删除 " + s.Name + "？\n引用 " + s.Ref + " 会失效，已贴出去的地方不再能解析。", "删除密钥", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+            List<Secret> chosen = SelectedAll();
+            if (chosen.Count == 0) return;
+            string what = chosen.Count == 1
+                ? "删除 " + chosen[0].Name + "？\n引用 " + chosen[0].Ref + " 会失效，已贴出去的地方不再能解析。"
+                : "删除选中的 " + chosen.Count + " 条？\n它们的引用都会失效，已贴出去的地方不再能解析。";
+            DialogResult answer = MessageBox.Show(this, what, "删除密钥", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
             if (answer != DialogResult.Yes) return;
-            JtResult r = Jt.Run(new[] { "rm", s.Ref }, null);
-            if (!r.Ok)
+            foreach (Secret s in chosen)
             {
-                Fail("删除失败", r);
-                return;
+                JtResult r = Jt.Run(new[] { "rm", s.Ref }, null);
+                if (!r.Ok)
+                {
+                    Fail("删除 " + s.Name + " 失败", r);
+                    break;
+                }
             }
             Reload();
         }
