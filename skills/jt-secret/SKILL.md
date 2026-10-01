@@ -17,10 +17,10 @@ description: Consume and name jt secret references (`jt://secret/...`) and group
 
 ```
 jt://env/cf  （整组注入：jt env cf -- <命令>）
-cf/CLOUDFLARE_ACCOUNT_ID  jt://secret/K3TNDc11
-cf/CLOUDFLARE_API_TOKEN  jt://secret/IXg9k34u
-cf/AWS_ACCESS_KEY_ID  jt://secret/cnpzqISu
-cf/AWS_SECRET_ACCESS_KEY  jt://secret/51Jaynpt
+cf/CLOUDFLARE_ACCOUNT_ID  jt://secret/Abcd1234
+cf/CLOUDFLARE_API_TOKEN  jt://secret/Efgh5678
+cf/AWS_ACCESS_KEY_ID  jt://secret/Ijkl9012
+cf/AWS_SECRET_ACCESS_KEY  jt://secret/Mnop3456
 ```
 
 - 整组一起用：`jt env cf -- <命令>`（`jt env jt://env/cf -- <命令>` 也行），每条的 `VAR_NAME` 就是子进程里的环境变量名。这是优先选择：wrangler、aws、rclone 这类工具直接读这些变量。

@@ -3,3 +3,7 @@
 dist/
 *.test
 .DS_Store
+
+# go build ./... drops the binary here
+/jt.exe
+/jt

@@ -11,14 +11,14 @@
 ```powershell
 # 1. 在 Cloudflare 后台复制 token，然后：
 jt grab cf/CLOUDFLARE_API_TOKEN --description 'Cloudflare API token, zone DNS edit'
-# grabbed cf/CLOUDFLARE_API_TOKEN jt://secret/V245z3Ye
+# grabbed cf/CLOUDFLARE_API_TOKEN jt://secret/Efgh5678
 # reference copied to clipboard; the plaintext is no longer on it
 
-# 2. 剪贴板里现在是 jt://secret/V245z3Ye，粘贴给 AI：
-#    "用 jt://secret/V245z3Ye 这个 token 把 example.com 的 A 记录改成 1.2.3.4"
+# 2. 剪贴板里现在是 jt://secret/Efgh5678，粘贴给 AI：
+#    "用 jt://secret/Efgh5678 这个 token 把 example.com 的 A 记录改成 1.2.3.4"
 
 # 3. AI（装了 skills/jt-secret）会这样用它，真值只在子进程里：
-jt resolve jt://secret/V245z3Ye --env CLOUDFLARE_API_TOKEN --exec wrangler whoami
+jt resolve jt://secret/Efgh5678 --env CLOUDFLARE_API_TOKEN --exec wrangler whoami
 jt env cf -- wrangler whoami
 ```
 
@@ -47,7 +47,7 @@ irm https://raw.githubusercontent.com/Aonggg/jt/main/install.ps1 | iex
 
 ```powershell
 gh repo create jt-vault --private          # 或在 GitHub 网页上建一个私有仓库
-jt init --repo https://github.com/Aonggg/jt-vault.git
+jt init --repo https://github.com/<你>/jt-vault.git
 jt sync
 ```
 
@@ -78,10 +78,10 @@ jt sync
 
 ```
 jt://env/cf  （整组注入：jt env cf -- <命令>）
-cf/CLOUDFLARE_ACCOUNT_ID  jt://secret/K3TNDc11
-cf/CLOUDFLARE_API_TOKEN  jt://secret/IXg9k34u
-cf/AWS_ACCESS_KEY_ID  jt://secret/cnpzqISu
-cf/AWS_SECRET_ACCESS_KEY  jt://secret/51Jaynpt
+cf/CLOUDFLARE_ACCOUNT_ID  jt://secret/Abcd1234
+cf/CLOUDFLARE_API_TOKEN  jt://secret/Efgh5678
+cf/AWS_ACCESS_KEY_ID  jt://secret/Ijkl9012
+cf/AWS_SECRET_ACCESS_KEY  jt://secret/Mnop3456
 ```
 
 `resolve` 和 `env` **直接运行**你给的程序，不会偷偷启动 shell。需要 shell 语法时自己写明：
