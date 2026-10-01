@@ -21,6 +21,10 @@ namespace JtGui
         // current value in the update dialog. jt itself still never prints.
         public const string PrintEnvFlag = "--print-env";
 
+        // ExePath is this program's file, used as the --exec child; unlike
+        // Application.ExecutablePath it is right even when the assembly is hosted.
+        public static readonly string ExePath = typeof(Program).Assembly.Location;
+
         [STAThread]
         static int Main(string[] args)
         {
@@ -156,6 +160,25 @@ namespace JtGui
             ScrollBars = ScrollBars.Vertical;
             Height = Dpi.Px(120);
             if (BecameMultiline != null) BecameMultiline(this, EventArgs.Empty);
+        }
+    }
+
+    // ClipboardHistory clears Win+V history the same way `jt grab --clear-history`
+    // does, for the split flow that stores through `jt add`.
+    static class ClipboardHistory
+    {
+        public static void Clear()
+        {
+            const string script = "[Windows.ApplicationModel.DataTransfer.Clipboard,Windows.ApplicationModel.DataTransfer,ContentType=WindowsRuntime] | Out-Null; [Windows.ApplicationModel.DataTransfer.Clipboard]::ClearHistory() | Out-Null";
+            try
+            {
+                var info = new System.Diagnostics.ProcessStartInfo("powershell", "-NoProfile -NonInteractive -Command \"" + script + "\"") { UseShellExecute = false, CreateNoWindow = true };
+                using (var p = System.Diagnostics.Process.Start(info))
+                {
+                    p.WaitForExit(15000);
+                }
+            }
+            catch (Exception) { }
         }
     }
 
@@ -376,6 +399,8 @@ namespace JtGui
             bar.Items.Add(new ToolStripSeparator());
             bar.Items.Add(Button("同步", "jt sync：拉取、提交、推送", (s, e) => Sync()));
             bar.Items.Add(Button("刷新", "F5", (s, e) => Reload()));
+            bar.Items.Add(new ToolStripSeparator());
+            bar.Items.Add(Button("AI 设置", "接入 DeepSeek 等 OpenAI 兼容模型，抓取时自动拆分命名", (s, e) => AiSetup()));
             Controls.Add(bar);
         }
 
@@ -475,6 +500,7 @@ namespace JtGui
                 autostart.Checked = Settings.Autostart;
             };
             menu.Items.Add(autostart);
+            menu.Items.Add("AI 设置…", null, (s, e) => AiSetup());
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("退出", null, (s, e) => Quit());
             tray.ContextMenuStrip = menu;
@@ -744,8 +770,18 @@ namespace JtGui
             Notify("明文已复制（不进剪贴板历史）", s.Name + "  " + s.Preview);
         }
 
+        // GrabFromClipboard stores the clipboard. A block with labels ("帐户 ID是…",
+        // "API Token: …") is offered as several named entries first; a bare value
+        // goes straight to the single-entry dialog.
         void GrabFromClipboard()
         {
+            string text = ClipboardText();
+            if (text != null)
+            {
+                MaskResult masked = Split.Mask(text);
+                bool structured = masked.Tokens.Count > 0 && masked.Tokens[0].Value.Trim() != text.Trim();
+                if (structured && !OrganizeAndStore(masked)) return;
+            }
             var name = new PromptField { Label = "名称", Hint = NamespaceHint(), Ascii = true };
             var desc = new PromptField { Label = "描述", Hint = "明文元数据，会进 Git：只写用途、归属，不写密钥" };
             using (var dialog = new PromptForm("抓取剪贴板里的密钥", new[] { name, desc }, "顺便清空 Windows 剪贴板历史 (Win+V)", Settings.ClearHistory))
@@ -769,6 +805,129 @@ namespace JtGui
                 }
                 Notify("已存进 jt，引用在剪贴板里", n + "\n" + r.Reference);
                 ShowEntry(r.Reference);
+            }
+        }
+
+        static string ClipboardText()
+        {
+            try
+            {
+                return Clipboard.ContainsText() ? Clipboard.GetText() : null;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        // OrganizeAndStore names the masked tokens (AI when configured, table
+        // otherwise), confirms with the user and stores each row. Returns true
+        // when the user asked to store the block whole instead.
+        bool OrganizeAndStore(MaskResult masked)
+        {
+            string ns = Split.LocalNamespace(masked);
+            List<SplitField> fields = Split.LocalFields(masked);
+            string note = "识别出 " + fields.Count + " 个值，按内置规则命名（托盘菜单 → AI 设置 可以接入 DeepSeek 自动整理）。请确认：";
+            string shown = null;
+            if (AiSettings.Enabled)
+            {
+                SetStatus("AI 正在整理…");
+                UseWaitCursor = true;
+                string error;
+                AiPlan plan = Ai.Organize(masked, out error);
+                UseWaitCursor = false;
+                shown = masked.Text;
+                if (plan != null)
+                {
+                    if (plan.Namespace.Length > 0) ns = plan.Namespace;
+                    if (plan.Fields.Count > 0) fields = plan.Fields;
+                    note = "AI（" + AiSettings.Model + "）整理了 " + fields.Count + " 条，请确认名称：";
+                }
+                else
+                {
+                    note = "AI 整理失败，已改用内置规则：" + error;
+                }
+            }
+            using (var dialog = new SplitForm(note, shown, ns, fields, Settings.ClearHistory))
+            {
+                ShowDialogOnTop(dialog);
+                if (dialog.Result == SplitForm.Outcome.Cancel) return false;
+                if (dialog.Result == SplitForm.Outcome.Whole) return true;
+                Settings.ClearHistory = dialog.ClearHistory;
+                var refs = new System.Text.StringBuilder();
+                string first = "";
+                int added = 0;
+                foreach (SplitField f in dialog.Chosen())
+                {
+                    string full = dialog.Namespace + "/" + f.Name;
+                    var args = new List<string> { "add", full };
+                    AddDescription(args, f.Description);
+                    JtResult r = Jt.Run(args.ToArray(), f.Value);
+                    if (!r.Ok)
+                    {
+                        Fail("存入 " + full + " 失败（之前的 " + added + " 条已存入）", r);
+                        break;
+                    }
+                    if (first.Length == 0) first = r.Reference;
+                    refs.Append(full).Append("  ").Append(r.Reference).Append("\r\n");
+                    added++;
+                }
+                if (added == 0) return false;
+                if (dialog.ClearHistory) ClipboardHistory.Clear();
+                try { Clipboard.SetText(refs.ToString()); } catch (Exception) { }
+                Notify("已拆成 " + added + " 条存进 jt，引用清单在剪贴板里", "jt env " + dialog.Namespace + " -- <命令> 可一次注入");
+                ShowEntry(first);
+                return false;
+            }
+        }
+
+        // AiSetup configures the OpenAI-compatible endpoint; the key goes into jt, not the registry.
+        void AiSetup()
+        {
+            var url = new PromptField { Label = "接口地址", Value = AiSettings.BaseUrl, Ascii = true, Hint = "OpenAI 兼容接口。DeepSeek 填 https://api.deepseek.com；其它服务填到 /v1 为止" };
+            var model = new PromptField { Label = "模型", Value = AiSettings.Model, Ascii = true };
+            var keyName = new PromptField { Label = "密钥在 jt 里的名称", Value = AiSettings.KeyName, Ascii = true, Hint = "API Key 本身存在 jt 里，和别的密钥一样加密、同步" };
+            var key = new PromptField { Label = "API Key", Masked = true, Ascii = true, Hint = "留空表示沿用 jt 里已有的那条" };
+            using (var dialog = new PromptForm("AI 设置", new[] { url, model, keyName, key }, "启用 AI 整理（抓取剪贴板时自动拆分并命名；只发送标签和占位符，不发送值）", AiSettings.Enabled))
+            {
+                if (ShowDialogOnTop(dialog) != DialogResult.OK) return;
+                if (dialog[0].Trim().Length == 0 || dialog[1].Trim().Length == 0 || dialog[2].Trim().Length == 0)
+                {
+                    SetStatus("接口地址、模型和密钥名称都不能为空");
+                    return;
+                }
+                AiSettings.BaseUrl = dialog[0].Trim();
+                AiSettings.Model = dialog[1].Trim();
+                AiSettings.KeyName = dialog[2].Trim();
+                if (dialog[3].Length > 0)
+                {
+                    bool exists = false;
+                    foreach (Secret s in secrets)
+                    {
+                        if (s.Name == AiSettings.KeyName) exists = true;
+                    }
+                    JtResult r = exists
+                        ? Jt.Run(new[] { "set", AiSettings.KeyName }, dialog[3])
+                        : Jt.Run(new[] { "add", AiSettings.KeyName, "--description=AI 整理用的 API Key（jt-gui）" }, dialog[3]);
+                    if (!r.Ok)
+                    {
+                        Fail("保存 API Key 失败", r);
+                        return;
+                    }
+                    Reload();
+                }
+                AiSettings.Enabled = dialog.OptionChecked;
+                if (!dialog.OptionChecked)
+                {
+                    SetStatus("AI 整理已关闭");
+                    return;
+                }
+                UseWaitCursor = true;
+                string error;
+                bool ok = Ai.Test(out error);
+                UseWaitCursor = false;
+                if (ok) Notify("AI 连接正常", AiSettings.BaseUrl + " · " + AiSettings.Model);
+                else MessageBox.Show(this, error + "\n\n设置已保存；修好后再试一次。", "AI 连接失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
 
@@ -814,7 +973,7 @@ namespace JtGui
         {
             Secret s = Selected();
             if (s == null) return;
-            JtResult current = Jt.Run(new[] { "resolve", s.Ref, "--exec", Application.ExecutablePath, Program.PrintEnvFlag, "JT_SECRET" }, null);
+            JtResult current = Jt.Run(new[] { "resolve", s.Ref, "--exec", Program.ExePath, Program.PrintEnvFlag, "JT_SECRET" }, null);
             if (!current.Ok)
             {
                 Fail("读取当前值失败", current);

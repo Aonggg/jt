@@ -101,6 +101,25 @@ jt resolve cf/CLOUDFLARE_API_TOKEN --exec powershell -NoProfile -Command "curl.e
 - 状态栏显示条数和同步状态；同步失败会弹出 git 的原话。
 - 托盘菜单：显示 / 隐藏、抓取剪贴板、同步、开机自动启动到托盘、退出。关窗口只是收到托盘。
 
+### 一整块账号信息自动拆开
+
+复制下面这样的文本再按 Ctrl+Shift+G：
+
+```
+Cloudflare 账号 someone@example.com
+帐户 ID是0d43…
+API 令牌是cfat_…
+访问密钥 ID是81ea…
+秘密访问密钥是9162…
+```
+
+会弹出"拆成多条密钥"对话框：命名空间 `cf`，四条分别命名为 `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN`、`AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`（R2 的 S3 兼容名），邮箱作为 `CLOUDFLARE_EMAIL`。双击可改名、取消勾选可跳过，也可以"整块存为一条"。确认后逐条存入，引用清单放进剪贴板，之后 `jt env cf -- <命令>` 一次注入整组。
+
+识别分两层：
+
+- **本地**：每行按 `标签: 值`、`标签=值`、`标签是值` 切开，没有分隔符的行里把邮箱和像密钥的字符串挑出来；名称来自内置对照表（帐户 ID → ACCOUNT_ID、令牌 → API_TOKEN、访问密钥 ID → AWS_ACCESS_KEY_ID……）。不联网，默认就是这样。
+- **AI**（可选，工具栏或托盘菜单 → AI 设置）：接入 DeepSeek 或任何 OpenAI 兼容接口，让模型来起名、定命名空间、写描述，对各种乱七八糟的格式更稳。**发给模型的只有标签、占位符和"值的形状"**（例如 `<V2>: 46 个字符，含符号的字符串，前缀 cfat_`），真值在本地换回来；对话框里会原样显示发出去的内容，可以核对。API Key 本身存在 jt 里（默认名 `ai/DEEPSEEK_API_KEY`），不进注册表、不进 Git 明文。
+
 没有剪贴板历史管理——Windows 自己有 Win+V。
 
 ## 给 AI 用
