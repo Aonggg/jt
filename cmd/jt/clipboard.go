@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // grab is the clipboard entry point: copy a secret anywhere, run grab, and the
@@ -51,10 +52,13 @@ func grab(args []string) error {
 	return nil
 }
 
-// ref copies an existing secret's reference to the clipboard.
+// ref copies a secret's reference to the clipboard. Given a namespace (or a
+// jt://env/<namespace> token) instead, it copies the whole group: the group
+// token on the first line, then one "name  reference" line per entry, so an
+// agent can inject everything with jt env or pick single references.
 func ref(args []string) error {
 	if len(args) != 1 {
-		return errors.New("ref needs <name-or-ref>")
+		return errors.New("ref needs <name-or-ref> or <namespace>")
 	}
 	c, err := loadConfig()
 	if err != nil {
@@ -64,15 +68,45 @@ func ref(args []string) error {
 	if err != nil {
 		return err
 	}
-	_, item, err := find(v, args[0])
+	if _, item, err := find(v, args[0]); err == nil {
+		if err := writeClipboard(prefix+item.ID, false); err != nil {
+			return err
+		}
+		fmt.Printf("%s %s\nreference copied to clipboard\n", item.Name, prefix+item.ID)
+		return nil
+	}
+	text, err := groupReferences(v, args[0])
 	if err != nil {
 		return err
 	}
-	if err := writeClipboard(prefix+item.ID, false); err != nil {
+	if err := writeClipboard(text, false); err != nil {
 		return err
 	}
-	fmt.Printf("%s %s\nreference copied to clipboard\n", item.Name, prefix+item.ID)
+	fmt.Print(text + "group references copied to clipboard\n")
 	return nil
+}
+
+// groupReferences renders the entries under namespace; the format is shared
+// with the GUI and documented in skills/jt-secret.
+func groupReferences(v vault, namespace string) (string, error) {
+	namespace = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(namespace), groupPrefix), "/")
+	if namespace == "" || strings.Contains(namespace, "/") {
+		return "", errors.New("secret not found")
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s%s  （整组注入：jt env %s -- <命令>）\n", groupPrefix, namespace, namespace)
+	count := 0
+	for _, item := range filterEntries(v.Secrets, "") {
+		if !strings.HasPrefix(item.Name, namespace+"/") {
+			continue
+		}
+		fmt.Fprintf(&sb, "%s  %s%s\n", item.Name, prefix, item.ID)
+		count++
+	}
+	if count == 0 {
+		return "", fmt.Errorf("secret not found, and no entries under %q", namespace+"/")
+	}
+	return sb.String(), nil
 }
 
 // copyValue puts the plaintext on the clipboard for a human to paste into a

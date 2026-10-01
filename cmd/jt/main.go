@@ -28,8 +28,10 @@ import (
 )
 
 const (
-	version = "0.4.0"
+	version = "0.5.3"
 	prefix  = "jt://secret/"
+	// groupPrefix names a whole namespace: jt://env/cf stands for every cf/* entry.
+	groupPrefix = "jt://env/"
 )
 
 type config struct {
@@ -121,18 +123,19 @@ Usage:
   jt describe <name-or-ref> <description>
   jt rm <name-or-ref>
   jt mv <name-or-ref> <new-name>
-  jt ref <name-or-ref>
+  jt ref <name-or-ref|namespace>
   jt copy <name-or-ref>
   jt resolve <name-or-ref> [--env NAME] --exec COMMAND [ARGS...]
-  jt env <namespace> -- COMMAND [ARGS...]
+  jt env <namespace|jt://env/namespace> -- COMMAND [ARGS...]
   jt key export | import [KEY]
   jt sync
   jt status [--json]
 
 grab encrypts the clipboard text and replaces it with a jt://secret/<id> reference.
 add/set read the value from stdin unless --from-clipboard is used.
-ref copies a reference to the clipboard; copy puts the plaintext there for you,
-excluded from Windows clipboard history.
+ref copies a reference to the clipboard; given a namespace it copies the whole
+group (jt://env/<namespace> plus every name and reference). copy puts the
+plaintext there for you, excluded from Windows clipboard history.
 resolve and env decrypt only into the environment of the child process and
 never print values; the command runs directly, name a shell (cmd /C, bash -c)
 when you need one. resolve uses JT_SECRET unless --env sets another name.
@@ -768,7 +771,7 @@ func env(args []string) error {
 	if len(args) < 3 || args[1] != "--" {
 		return errors.New("env needs <namespace> -- COMMAND [ARGS...]")
 	}
-	namespace := args[0]
+	namespace := strings.TrimPrefix(args[0], groupPrefix)
 	c, err := loadConfig()
 	if err != nil {
 		return err

@@ -119,6 +119,41 @@ func TestCopyIsSensitiveAndRefIsNot(t *testing.T) {
 	}
 }
 
+func TestRefGroupAndEnvToken(t *testing.T) {
+	setup(t, []entry{
+		{ID: "BBBBBBBB", Name: "cf/CLOUDFLARE_API_TOKEN", Ciphertext: "x", Preview: "**"},
+		{ID: "AAAAAAAA", Name: "cf/CLOUDFLARE_ACCOUNT_ID", Ciphertext: "x", Preview: "**"},
+		{ID: "CCCCCCCC", Name: "cfx/OTHER", Ciphertext: "x", Preview: "**"},
+		{ID: "DDDDDDDD", Name: "cf", Ciphertext: "x", Preview: "**"}, // an entry literally named cf wins over the group
+	})
+	clip := useFakeClipboard(t, "", false)
+	if err := ref([]string{"cf"}); err != nil || clip.text != prefix+"DDDDDDDD" {
+		t.Fatalf("exact name must win: %v %q", err, clip.text)
+	}
+	want := "jt://env/cf  （整组注入：jt env cf -- <命令>）\ncf/CLOUDFLARE_ACCOUNT_ID  jt://secret/AAAAAAAA\ncf/CLOUDFLARE_API_TOKEN  jt://secret/BBBBBBBB\n"
+	for _, arg := range []string{"jt://env/cf", "cf/"} {
+		if err := ref([]string{arg}); err != nil {
+			t.Fatal(err)
+		}
+		if clip.text != want || clip.sensitive {
+			t.Fatalf("group references for %q:\n%s", arg, clip.text)
+		}
+	}
+	if err := ref([]string{"nope"}); err == nil {
+		t.Fatal("unknown namespace must fail")
+	}
+
+	// jt env accepts the group token in place of the namespace.
+	t.Setenv("JT_TEST_HELPER", "1")
+	input(t, "fixture-value")
+	if err := add([]string{"grp/KEY"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := env([]string{"jt://env/grp", "--", os.Args[0], "-test.run=^TestHelperProcess$", "--", "KEY", "fixture-value"}); err != nil {
+		t.Fatalf("env with group token: %v", err)
+	}
+}
+
 func TestResolveNeverPrintsAndRunsWithoutShell(t *testing.T) {
 	setup(t, nil)
 	t.Setenv("JT_TEST_HELPER", "1")

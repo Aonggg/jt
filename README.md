@@ -65,15 +65,23 @@ jt sync
 | `jt add <name> [--from-clipboard] [--description TEXT]` | 从 stdin（或剪贴板）读值新建一条，不改剪贴板 |
 | `jt set <name-or-ref> [--from-clipboard] [--description TEXT]` | 换掉某条的值，ID 和引用不变 |
 | `jt ls [--json] [query]` | 列出名称、引用、遮罩预览、描述；永不输出真值或密文 |
-| `jt ref <name-or-ref>` | 把引用复制到剪贴板 |
+| `jt ref <name-or-ref>` / `jt ref <namespace>` | 把单条引用复制到剪贴板 / 把整组引用（`jt://env/<namespace>` + 每条名称和引用）复制到剪贴板 |
 | `jt copy <name-or-ref>` | 把**明文**复制到剪贴板给你自己粘贴，标记为不进剪贴板历史 |
 | `jt resolve <name-or-ref> [--env NAME] --exec CMD [ARGS...]` | 解密后以环境变量（默认 `JT_SECRET`）运行命令 |
-| `jt env <namespace> -- CMD [ARGS...]` | `namespace/VAR` 下所有条目变成子进程的环境变量 `VAR` |
+| `jt env <namespace> -- CMD [ARGS...]` | `namespace/VAR` 下所有条目变成子进程的环境变量 `VAR`；也接受组引用 `jt://env/<namespace>` |
 | `jt describe` / `jt mv` / `jt rm` | 改描述 / 改名 / 删除 |
 | `jt key export` / `jt key import [KEY]` | 主密钥经剪贴板在机器之间搬运 |
 | `jt sync` / `jt status [--json]` | 拉取、提交、推送 vault / 查看本地是否有未同步改动 |
 
-名称约定 `命名空间/VAR_NAME`，例如 `cf/CLOUDFLARE_API_TOKEN`、`cf/CLOUDFLARE_ACCOUNT_ID`，这样 `jt env cf -- ...` 一次注入整组。
+名称约定 `命名空间/VAR_NAME`，例如 `cf/CLOUDFLARE_API_TOKEN`、`cf/CLOUDFLARE_ACCOUNT_ID`。同一命名空间就是一个**组**：`jt env cf -- ...` 一次注入整组；`jt ref cf` 复制整组引用——第一行是组引用 `jt://env/cf`，后面每行一条 `名称  引用`，贴给 AI 它既能整组用（`jt env cf`），也能挑其中一条用：
+
+```
+jt://env/cf  （整组注入：jt env cf -- <命令>）
+cf/CLOUDFLARE_ACCOUNT_ID  jt://secret/K3TNDc11
+cf/CLOUDFLARE_API_TOKEN  jt://secret/IXg9k34u
+cf/AWS_ACCESS_KEY_ID  jt://secret/cnpzqISu
+cf/AWS_SECRET_ACCESS_KEY  jt://secret/51Jaynpt
+```
 
 `resolve` 和 `env` **直接运行**你给的程序，不会偷偷启动 shell。需要 shell 语法时自己写明：
 
@@ -96,7 +104,7 @@ jt resolve cf/CLOUDFLARE_API_TOKEN --exec powershell -NoProfile -Command "curl.e
 面板里：
 
 - 顶部搜索框直接打字过滤名称 / 描述 / ID（输入法在这个框里是关的，粘贴中文照样能搜）；↑↓ 选行，**Enter 复制引用并收起面板**，然后去 AI 对话里粘贴。
-- 工具栏：抓取剪贴板、新建（手动输入，值用密码框）、复制引用、复制明文（不进剪贴板历史）、改名（F2）、描述、查看/更新值、删除、同步、刷新（F5）。右键行也有这些。
+- 列表按命名空间分组显示，组头写着整组引用 `jt://env/cf` 和注入命令。工具栏：抓取剪贴板、新建（手动输入，值用密码框）、复制引用（Enter）、**复制整组**（Ctrl+Enter，这一组所有引用）、复制明文（不进剪贴板历史）、改名（F2）、描述、查看/更新值、删除、同步、刷新（F5）。右键行也有这些。
 - 查看/更新值：对话框里直接显示当前值（默认遮住，勾"显示"看明文；多行的值直接显示），改完确定就更新，引用不变。GUI 拿到这个值的方式和 Agent 一样——`jt resolve <引用> --exec jt-gui.exe --print-env JT_SECRET`，由子进程把环境变量写回来；`jt` 本身仍然不打印任何真值。
 - 状态栏显示条数和同步状态；同步失败会弹出 git 的原话。
 - 托盘菜单：显示 / 隐藏、抓取剪贴板、同步、开机自动启动到托盘、退出。关窗口只是收到托盘。
@@ -113,7 +121,7 @@ API 令牌是cfat_…
 秘密访问密钥是9162…
 ```
 
-会弹出"拆成多条密钥"对话框：命名空间 `cf`，四条分别命名为 `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN`、`AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`（R2 的 S3 兼容名），邮箱作为 `CLOUDFLARE_EMAIL`。双击可改名、取消勾选可跳过，也可以"整块存为一条"。确认后逐条存入，引用清单放进剪贴板，之后 `jt env cf -- <命令>` 一次注入整组。
+会弹出"拆成多条密钥"对话框：命名空间 `cf`，四条分别命名为 `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN`、`AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`（R2 的 S3 兼容名），邮箱作为 `CLOUDFLARE_EMAIL`。双击可改名、取消勾选可跳过，也可以"整块存为一条"。确认后逐条存入，**整组引用**放进剪贴板，直接贴给 AI 就行。
 
 识别分两层：
 

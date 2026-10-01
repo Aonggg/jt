@@ -398,6 +398,7 @@ namespace JtGui
             bar.Items.Add(Button("新建…", "手动输入一条密钥", (s, e) => AddTyped()));
             bar.Items.Add(new ToolStripSeparator());
             bar.Items.Add(Button("复制引用", "jt://secret/<id> 到剪贴板 (Enter)", (s, e) => CopyReference(false)));
+            bar.Items.Add(Button("复制整组", "这一组（同一命名空间）所有引用到剪贴板 (Ctrl+Enter)", (s, e) => CopyGroup(false)));
             bar.Items.Add(Button("复制明文", "真值到剪贴板，不进剪贴板历史 (Ctrl+Shift+C)", (s, e) => CopyValue()));
             bar.Items.Add(new ToolStripSeparator());
             bar.Items.Add(Button("改名", "F2", (s, e) => Rename()));
@@ -451,6 +452,7 @@ namespace JtGui
         void BuildList()
         {
             list.View = View.Details;
+            list.ShowGroups = true;
             list.FullRowSelect = true;
             list.HideSelection = false;
             list.MultiSelect = false;
@@ -473,6 +475,7 @@ namespace JtGui
             };
             var menu = new ContextMenuStrip();
             menu.Items.Add("复制引用", null, (s, e) => CopyReference(false));
+            menu.Items.Add("复制整组引用", null, (s, e) => CopyGroup(false));
             menu.Items.Add("复制明文", null, (s, e) => CopyValue());
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("改名…", null, (s, e) => Rename());
@@ -589,6 +592,9 @@ namespace JtGui
                     search.Focus();
                     search.SelectAll();
                     return true;
+                case Keys.Control | Keys.Enter:
+                    CopyGroup(true);
+                    return true;
                 case Keys.Control | Keys.Shift | Keys.C:
                     CopyValue();
                     return true;
@@ -664,6 +670,8 @@ namespace JtGui
             ShowSummary();
         }
 
+        // ApplyFilter rebuilds the rows, grouped by namespace so a block that was
+        // split into several entries reads as one unit.
         void ApplyFilter()
         {
             string query = search.Text.Trim();
@@ -671,12 +679,28 @@ namespace JtGui
             Secret keep = Selected();
             list.BeginUpdate();
             list.Items.Clear();
+            list.Groups.Clear();
+            var groups = new Dictionary<string, ListViewGroup>();
             foreach (Secret s in secrets)
             {
                 if (query.Length > 0 && !s.Name.ToLowerInvariant().Contains(lower) && !s.Description.ToLowerInvariant().Contains(lower) && !s.Id.Contains(query)) continue;
                 var item = new ListViewItem(new[] { s.Name, s.Ref, s.Preview, OneLine(s.Description), LocalTime(s.UpdatedAt) }) { Tag = s, ToolTipText = s.Description };
+                string ns = s.Namespace;
+                ListViewGroup group;
+                if (!groups.TryGetValue(ns, out group))
+                {
+                    group = new ListViewGroup(ns.Length == 0 ? "未分组" : ns) { Tag = ns };
+                    groups[ns] = group;
+                    list.Groups.Add(group);
+                }
+                item.Group = group;
                 list.Items.Add(item);
                 if (keep != null && keep.Ref == s.Ref) item.Selected = true;
+            }
+            foreach (ListViewGroup group in list.Groups)
+            {
+                string ns = (string)group.Tag;
+                group.Header = ns.Length == 0 ? "未分组 · " + group.Items.Count + " 条" : ns + " · " + group.Items.Count + " 条 · 整组引用 jt://env/" + ns + " · 一次注入 jt env " + ns + " -- <命令>";
             }
             list.EndUpdate();
             if (list.Items.Count > 0 && list.SelectedItems.Count == 0) list.Items[0].Selected = true;
@@ -765,6 +789,32 @@ namespace JtGui
             if (hideAfter) Hide();
         }
 
+        // CopyGroup copies the selected entry's whole namespace: jt://env/<ns> and
+        // every name/reference line, the format jt ref <namespace> produces.
+        void CopyGroup(bool hideAfter)
+        {
+            Secret s = Selected();
+            if (s == null) return;
+            if (s.Namespace.Length == 0)
+            {
+                SetStatus(s.Name + " 不在任何分组里（名称里没有 /）");
+                return;
+            }
+            JtResult r = Jt.Run(new[] { "ref", s.Namespace }, null);
+            if (!r.Ok)
+            {
+                Fail("复制整组引用失败", r);
+                return;
+            }
+            int count = 0;
+            foreach (Secret other in secrets)
+            {
+                if (other.Namespace == s.Namespace) count++;
+            }
+            Notify("整组 " + s.Namespace + " 的 " + count + " 个引用已复制", "jt env " + s.Namespace + " -- <命令> 一次注入");
+            if (hideAfter) Hide();
+        }
+
         void CopyValue()
         {
             Secret s = Selected();
@@ -840,7 +890,6 @@ namespace JtGui
                 if (dialog.Result == SplitForm.Outcome.Cancel) return false;
                 if (dialog.Result == SplitForm.Outcome.Whole) return true;
                 Settings.ClearHistory = dialog.ClearHistory;
-                var refs = new System.Text.StringBuilder();
                 string first = "";
                 int added = 0;
                 foreach (SplitField f in dialog.Chosen())
@@ -855,13 +904,13 @@ namespace JtGui
                         break;
                     }
                     if (first.Length == 0) first = r.Reference;
-                    refs.Append(full).Append("  ").Append(r.Reference).Append("\r\n");
                     added++;
                 }
                 if (added == 0) return false;
                 if (dialog.ClearHistory) ClipboardHistory.Clear();
-                try { Clipboard.SetText(refs.ToString()); } catch (Exception) { }
-                Notify("已拆成 " + added + " 条存进 jt，引用清单在剪贴板里", "jt env " + dialog.Namespace + " -- <命令> 可一次注入");
+                // The whole group goes on the clipboard: jt://env/<ns> plus every name and reference.
+                Jt.Run(new[] { "ref", dialog.Namespace }, null);
+                Notify("已拆成 " + added + " 条存进 jt，整组引用在剪贴板里", "jt env " + dialog.Namespace + " -- <命令> 一次注入；也可以在面板里复制单条");
                 ShowEntry(first);
                 return false;
             }

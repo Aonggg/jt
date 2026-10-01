@@ -1,6 +1,6 @@
 ---
 name: jt-secret
-description: Consume and name jt secret references (`jt://secret/...`) on Windows without ever exposing the value. Use when a `jt://secret/...` token appears in a conversation, file, or tool result, when the user asks to name a jt secret, when a command needs an API token or password that the user has stored in jt, or when the user pastes a plaintext secret that should be moved into jt.
+description: Consume and name jt secret references (`jt://secret/...`) and group references (`jt://env/<namespace>`) on Windows without ever exposing the value. Use when a `jt://secret/...` or `jt://env/...` token appears in a conversation, file, or tool result, when the user asks to name a jt secret, when a command needs an API token or password that the user has stored in jt, or when the user pastes a plaintext secret that should be moved into jt.
 ---
 
 # jt 密钥引用
@@ -8,6 +8,23 @@ description: Consume and name jt secret references (`jt://secret/...`) on Window
 `jt://secret/<id>` 是 jt 的**密钥引用**：指向一条加密存储的记录，本身不含真值。真值从引用推不出来，只能由 `jt` 在本机解密，并且只会注入到它启动的子进程的环境变量里。`jt` 永远不把真值打印到 stdout：`jt resolve <引用>` 不带 `--exec` 直接报错。
 
 名称和引用都能用：`jt resolve cf/CLOUDFLARE_API_TOKEN ...` 与 `jt resolve jt://secret/Abcd1234 ...` 等价。
+
+## 整组引用 `jt://env/<命名空间>`
+
+用户也可能贴来一整组，格式固定：第一行是组引用 `jt://env/cf`（后面可能跟一句中文提示），之后每行一条 `名称  引用`：
+
+```
+jt://env/cf  （整组注入：jt env cf -- <命令>）
+cf/CLOUDFLARE_ACCOUNT_ID  jt://secret/K3TNDc11
+cf/CLOUDFLARE_API_TOKEN  jt://secret/IXg9k34u
+cf/AWS_ACCESS_KEY_ID  jt://secret/cnpzqISu
+cf/AWS_SECRET_ACCESS_KEY  jt://secret/51Jaynpt
+```
+
+- 整组一起用：`jt env cf -- <命令>`（`jt env jt://env/cf -- <命令>` 也行），每条的 `VAR_NAME` 就是子进程里的环境变量名。这是优先选择：wrangler、aws、rclone 这类工具直接读这些变量。
+- 只用其中一条：按行里的引用 `jt resolve jt://secret/… --env <变量名> --exec …`。
+- 只知道组、不知道里面有什么：`jt ls cf/ --json` 列出名称和引用（没有真值）。
+- `jt://env/...` 不是密钥引用，不能传给 `jt resolve`。
 
 ## 消费引用
 
