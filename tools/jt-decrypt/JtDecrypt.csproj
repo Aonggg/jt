@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>JtDecrypt</AssemblyName>
+    <RootNamespace>JtDecrypt</RootNamespace>
+    <ApplicationIcon>..\..\gui\jt.ico</ApplicationIcon>
+    <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <Version>0.6.1</Version>
+    <Product>jt 解密工具</Product>
+    <Description>Decrypt jt vault backups (vault.json, Notion mirror, pasted ciphertext) with the master key, offline.</Description>
+  </PropertyGroup>
+
+</Project>

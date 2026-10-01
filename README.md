@@ -57,6 +57,7 @@ jt sync
 - vault 里只有密文、遮罩预览、名称、描述和时间戳；格式与原版 jt 的 v1 / v2 完全一致，同一个私有仓库可以同时给 Mac 上的 jt / jiantieban 用。
 - `jt init` 不带 `--repo` 也能用（只在本机，不同步）。
 - 想在 GitHub 之外再留一份：`tools/notion-mirror/` 是一个放进 vault 仓库的 GitHub Action，每次推送后把 `vault.json`（密文和元数据，不含明文）写进一个 Notion 页面——每条密钥一行、按 ID 更新、删除的标成"已删除"，外加整个文件的逐字备份。配合 GUI 的自动同步，就是"改完即三处一致：本机、GitHub、Notion"。装法见那个目录的 README。
+- 灾难恢复：`tools/jt-decrypt/` 是一个离线解密小程序（WinForms，单文件 exe），载入主密钥后能把 `vault.json`、Notion 页导出的 Markdown / CSV、或粘贴的任何一段密文解回明文。电脑没了、jt 装不上时用它；日常取值仍然走 `jt`。
 
 ## 命令
 
