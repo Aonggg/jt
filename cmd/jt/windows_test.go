@@ -154,6 +154,64 @@ func TestRefGroupAndEnvToken(t *testing.T) {
 	}
 }
 
+func TestGroupRenameAndRemove(t *testing.T) {
+	dir, _ := setup(t, []entry{
+		{ID: "AAAAAAAA", Name: "cf/TOKEN", Ciphertext: "x", Preview: "**", Description: "keep me"},
+		{ID: "BBBBBBBB", Name: "cf/ACCOUNT_ID", Ciphertext: "x", Preview: "**"},
+		{ID: "CCCCCCCC", Name: "cfx/OTHER", Ciphertext: "x", Preview: "**"},
+		{ID: "DDDDDDDD", Name: "new/ACCOUNT_ID", Ciphertext: "x", Preview: "**"},
+	})
+	// A clash anywhere in the group stops the whole rename before writing.
+	before := vaultBytes(t, dir)
+	if err := rename([]string{"cf/", "new/"}); err == nil || !bytes.Equal(before, vaultBytes(t, dir)) {
+		t.Fatalf("group rename with a clash must fail without writing: %v", err)
+	}
+	if err := rename([]string{"cf/", "cloudflare/"}); err != nil {
+		t.Fatal(err)
+	}
+	v := currentVault(t)
+	names := map[string]string{}
+	for _, item := range v.Secrets {
+		names[item.ID] = item.Name
+	}
+	if names["AAAAAAAA"] != "cloudflare/TOKEN" || names["BBBBBBBB"] != "cloudflare/ACCOUNT_ID" || names["CCCCCCCC"] != "cfx/OTHER" || names["DDDDDDDD"] != "new/ACCOUNT_ID" {
+		t.Fatalf("group rename moved the wrong entries: %v", names)
+	}
+	if _, item, _ := find(v, "cloudflare/TOKEN"); item.Description != "keep me" {
+		t.Fatal("group rename lost metadata")
+	}
+	if err := rename([]string{"jt://env/cloudflare", "jt://env/cf"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := find(currentVault(t), "cf/TOKEN"); err != nil {
+		t.Fatal("group token form of mv did not rename")
+	}
+	for _, args := range [][]string{{"cf/", "a/b/"}, {"nope/", "x/"}, {"cf/", "cfx"}} {
+		if err := rename(args); err == nil {
+			t.Fatalf("mv %q should fail", args)
+		}
+	}
+	// rm without the trailing slash is still a single-entry operation.
+	if err := remove([]string{"cf"}); err == nil {
+		t.Fatal("rm cf must not delete a group")
+	}
+	if err := remove([]string{"cf/"}); err != nil {
+		t.Fatal(err)
+	}
+	v = currentVault(t)
+	if len(v.Secrets) != 2 {
+		t.Fatalf("group remove left %d entries", len(v.Secrets))
+	}
+	for _, item := range v.Secrets {
+		if strings.HasPrefix(item.Name, "cf/") {
+			t.Fatalf("group remove left %s", item.Name)
+		}
+	}
+	if err := remove([]string{"cf/"}); err == nil {
+		t.Fatal("removing an empty group must fail")
+	}
+}
+
 func TestResolveNeverPrintsAndRunsWithoutShell(t *testing.T) {
 	setup(t, nil)
 	t.Setenv("JT_TEST_HELPER", "1")

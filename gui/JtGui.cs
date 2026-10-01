@@ -461,6 +461,7 @@ namespace JtGui
             var bar = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, RenderMode = ToolStripRenderMode.System, Padding = Dpi.Pad(6, 3, 6, 3), Dock = DockStyle.Top };
             bar.Items.Add(Button("抓取剪贴板", "把剪贴板里的密钥存进 jt，并把引用放回剪贴板 (Ctrl+Shift+G)", (s, e) => GrabFromClipboard()));
             bar.Items.Add(Button("新建…", "手动输入一条密钥", (s, e) => AddTyped()));
+            bar.Items.Add(Button("新建组…", "新建一个组（命名空间）并存入第一条；改名/删除组在组头右键菜单里", (s, e) => AddGroup()));
             bar.Items.Add(new ToolStripSeparator());
             bar.Items.Add(Button("复制引用", "jt://secret/<id> 到剪贴板 (Enter)", (s, e) => CopyReference(false)));
             bar.Items.Add(Button("复制整组", "这一组（同一命名空间）所有引用到剪贴板 (Ctrl+Enter)", (s, e) => CopyGroup(false)));
@@ -549,15 +550,23 @@ namespace JtGui
             menu.Items.Add("描述…", null, (s, e) => Describe());
             menu.Items.Add("查看 / 更新值…", null, (s, e) => SetValue());
             var remove = menu.Items.Add("删除", null, (s, e) => Delete());
+            menu.Items.Add(new ToolStripSeparator());
+            var renameGroup = menu.Items.Add("重命名组…", null, (s, e) => { Secret f = Selected(); if (f != null && f.Namespace.Length > 0) RenameGroup(f.Namespace); });
+            var deleteGroup = menu.Items.Add("删除整组…", null, (s, e) => { Secret f = Selected(); if (f != null && f.Namespace.Length > 0) DeleteGroup(f.Namespace); });
             menu.Opening += (s, e) =>
             {
                 int count = list.SelectedItems.Count;
                 e.Cancel = count == 0;
                 Secret first = Selected();
+                bool grouped = first != null && first.Namespace.Length > 0;
                 copyRefs.Text = count > 1 ? "复制选中的 " + count + " 条引用" : "复制引用";
-                copyGroup.Text = first != null && first.Namespace.Length > 0 ? "复制整组引用（" + first.Namespace + "）" : "复制整组引用";
-                copyGroup.Enabled = first != null && first.Namespace.Length > 0;
+                copyGroup.Text = grouped ? "复制整组引用（" + first.Namespace + "）" : "复制整组引用";
+                copyGroup.Enabled = grouped;
                 remove.Text = count > 1 ? "删除选中的 " + count + " 条" : "删除";
+                renameGroup.Text = grouped ? "重命名组 " + first.Namespace + "…" : "重命名组…";
+                renameGroup.Enabled = grouped;
+                deleteGroup.Text = grouped ? "删除整组 " + first.Namespace + "…" : "删除整组…";
+                deleteGroup.Enabled = grouped;
             };
             list.ContextMenuStrip = menu;
             Controls.Add(list);
@@ -1187,8 +1196,15 @@ namespace JtGui
             }
         }
 
+        // Rename renames the focused entry, or the whole group when a complete group is selected.
         void Rename()
         {
+            string group = SelectedWholeGroup();
+            if (group != null && list.SelectedItems.Count > 1)
+            {
+                RenameGroup(group);
+                return;
+            }
             Secret s = Selected();
             if (s == null) return;
             var name = new PromptField { Label = "新名称", Value = s.Name, Hint = NamespaceHint(), Ascii = true };
@@ -1206,6 +1222,119 @@ namespace JtGui
                 Reload();
                 Select(s.Ref);
             }
+        }
+
+        // SelectedWholeGroup is the namespace when the selection is exactly one
+        // complete group (what clicking a header produces), else null.
+        string SelectedWholeGroup()
+        {
+            List<Secret> chosen = SelectedAll();
+            if (chosen.Count == 0 || chosen[0].Namespace.Length == 0) return null;
+            string ns = chosen[0].Namespace;
+            int inGroup = 0;
+            foreach (Secret s in secrets)
+            {
+                if (s.Namespace == ns) inGroup++;
+            }
+            foreach (Secret s in chosen)
+            {
+                if (s.Namespace != ns) return null;
+            }
+            return chosen.Count == inGroup ? ns : null;
+        }
+
+        // AddGroup creates a group by storing its first entry under the new namespace.
+        void AddGroup()
+        {
+            var ns = new PromptField { Label = "组名", Ascii = true, Hint = "就是命名空间：小写短词，如 cf、github、db。已有：" + string.Join(", ", Namespaces()) };
+            var name = new PromptField { Label = "第一条的名称", Ascii = true, Hint = "环境变量名，如 API_TOKEN；一个组至少要有一条，之后用“新建”或“抓取”往组里加" };
+            var value = new PromptField { Label = "值", Masked = true, Ascii = true };
+            var desc = new PromptField { Label = "描述", Hint = "明文元数据，会进 Git：只写用途、归属，不写密钥" };
+            using (var dialog = new PromptForm("新建组", new[] { ns, name, value, desc }, null, false))
+            {
+                if (ShowDialogOnTop(dialog) != DialogResult.OK) return;
+                string group = dialog[0].Trim().Trim('/');
+                string entry = dialog[1].Trim();
+                if (group.Length == 0 || group.IndexOf('/') >= 0 || entry.Length == 0 || dialog[2].Length == 0)
+                {
+                    SetStatus("组名（不含 /）、第一条的名称和值都不能为空");
+                    return;
+                }
+                string full = group + "/" + entry;
+                var args = new List<string> { "add", full };
+                AddDescription(args, dialog[3]);
+                JtResult r = Jt.Run(args.ToArray(), dialog[2]);
+                if (!r.Ok)
+                {
+                    Fail("新建组失败", r);
+                    return;
+                }
+                Jt.Run(new[] { "ref", group }, null);
+                Notify("已新建组 " + group + "，整组引用在剪贴板里", full + "\n" + r.Reference);
+                ShowEntry(r.Reference);
+            }
+        }
+
+        // RenameGroup moves every entry of a namespace; references stay valid.
+        void RenameGroup(string ns)
+        {
+            var name = new PromptField { Label = "新组名", Value = ns, Ascii = true, Hint = "组里每一条都会改成 新组名/原名称；jt://secret/… 引用不变，只有整组引用 jt://env/" + ns + " 会变" };
+            using (var dialog = new PromptForm("重命名组 " + ns, new[] { name }, null, false))
+            {
+                if (ShowDialogOnTop(dialog) != DialogResult.OK) return;
+                string to = dialog[0].Trim().Trim('/');
+                if (to.Length == 0 || to == ns) return;
+                if (to.IndexOf('/') >= 0)
+                {
+                    SetStatus("组名不能包含 /");
+                    return;
+                }
+                JtResult r = Jt.Run(new[] { "mv", ns + "/", to + "/" }, null);
+                if (!r.Ok)
+                {
+                    Fail("重命名组失败", r);
+                    return;
+                }
+                Notify("组 " + ns + " 已改名为 " + to, "引用不变；整组引用现在是 jt://env/" + to);
+                Reload();
+                foreach (Secret s in secrets)
+                {
+                    if (s.Namespace == to)
+                    {
+                        Select(s.Ref);
+                        break;
+                    }
+                }
+            }
+        }
+
+        void DeleteGroup(string ns)
+        {
+            int count = 0;
+            foreach (Secret s in secrets)
+            {
+                if (s.Namespace == ns) count++;
+            }
+            DialogResult answer = MessageBox.Show(this, "删除整组 " + ns + "（" + count + " 条）？\n这些引用都会失效，已贴出去的地方不再能解析。", "删除组", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.Yes) return;
+            JtResult r = Jt.Run(new[] { "rm", ns + "/" }, null);
+            if (!r.Ok)
+            {
+                Fail("删除组失败", r);
+                return;
+            }
+            Notify("已删除组 " + ns, count + " 条");
+            Reload();
+        }
+
+        IEnumerable<string> Namespaces()
+        {
+            var names = new SortedSet<string>();
+            foreach (Secret s in secrets)
+            {
+                if (s.Namespace.Length > 0) names.Add(s.Namespace);
+            }
+            return names;
         }
 
         void Describe()

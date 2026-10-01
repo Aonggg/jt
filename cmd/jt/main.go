@@ -121,8 +121,8 @@ Usage:
   jt ls [--json] [query]
   jt set <name-or-ref> [--from-clipboard] [--description TEXT]
   jt describe <name-or-ref> <description>
-  jt rm <name-or-ref>
-  jt mv <name-or-ref> <new-name>
+  jt rm <name-or-ref> | <namespace>/
+  jt mv <name-or-ref> <new-name> | <namespace>/ <new-namespace>/
   jt ref <name-or-ref|namespace>
   jt copy <name-or-ref>
   jt resolve <name-or-ref> [--env NAME] --exec COMMAND [ARGS...]
@@ -664,9 +664,11 @@ func describe(args []string) error {
 	return nil
 }
 
+// remove deletes one entry, or with `<namespace>/` (or jt://env/<namespace>)
+// every entry of a group; the trailing slash makes the mass deletion explicit.
 func remove(args []string) error {
 	if len(args) != 1 {
-		return errors.New("rm needs <name-or-ref>")
+		return errors.New("rm needs <name-or-ref> or <namespace>/")
 	}
 	c, err := loadConfig()
 	if err != nil {
@@ -675,6 +677,24 @@ func remove(args []string) error {
 	v, _, err := openVault(c, false)
 	if err != nil {
 		return err
+	}
+	if namespace, _, ok := groupArgs(args[0], "x/"); ok {
+		members := groupMembers(v, namespace)
+		if len(members) == 0 {
+			return fmt.Errorf("no entries under %q", namespace+"/")
+		}
+		kept := make([]entry, 0, len(v.Secrets)-len(members))
+		for _, item := range v.Secrets {
+			if !strings.HasPrefix(item.Name, namespace+"/") {
+				kept = append(kept, item)
+			}
+		}
+		v.Secrets = kept
+		if err := saveVault(c, v); err != nil {
+			return err
+		}
+		fmt.Printf("removed group %s/ (%d entries)\n", namespace, len(members))
+		return nil
 	}
 	index, item, err := find(v, args[0])
 	if err != nil {
@@ -688,9 +708,13 @@ func remove(args []string) error {
 	fmt.Printf("removed %s %s\n", removed.Name, prefix+removed.ID)
 	return nil
 }
+
+// rename changes one entry's name, or with `old/ new/` (trailing slashes, or
+// jt://env/ tokens) moves every entry of a group to a new namespace. IDs and
+// references never change; only jt://env/<namespace> does.
 func rename(args []string) error {
 	if len(args) != 2 || args[1] == "" {
-		return errors.New("mv needs <name-or-ref> <new-name>")
+		return errors.New("mv needs <name-or-ref> <new-name>, or <namespace>/ <new-namespace>/")
 	}
 	c, err := loadConfig()
 	if err != nil {
@@ -699,6 +723,32 @@ func rename(args []string) error {
 	v, _, err := openVault(c, false)
 	if err != nil {
 		return err
+	}
+	if from, to, ok := groupArgs(args[0], args[1]); ok {
+		members := groupMembers(v, from)
+		if len(members) == 0 {
+			return fmt.Errorf("no entries under %q", from+"/")
+		}
+		names := map[string]bool{}
+		for _, item := range v.Secrets {
+			names[item.Name] = true
+		}
+		for _, i := range members {
+			target := to + "/" + strings.TrimPrefix(v.Secrets[i].Name, from+"/")
+			if names[target] {
+				return fmt.Errorf("name already exists: %s", target)
+			}
+		}
+		now := time.Now().UTC().Format(time.RFC3339)
+		for _, i := range members {
+			v.Secrets[i].Name = to + "/" + strings.TrimPrefix(v.Secrets[i].Name, from+"/")
+			v.Secrets[i].UpdatedAt = now
+		}
+		if err := saveVault(c, v); err != nil {
+			return err
+		}
+		fmt.Printf("renamed group %s/ to %s/ (%d entries; references unchanged)\n", from, to, len(members))
+		return nil
 	}
 	_, item, err := find(v, args[0])
 	if err != nil {
@@ -716,6 +766,35 @@ func rename(args []string) error {
 	}
 	fmt.Printf("renamed %s %s\n", item.Name, prefix+item.ID)
 	return nil
+}
+
+// groupArgs recognises the group forms of mv: both arguments end with "/" or
+// carry the jt://env/ prefix, and neither names a nested path.
+func groupArgs(from, to string) (string, string, bool) {
+	isGroup := func(s string) (string, bool) {
+		if strings.HasPrefix(s, groupPrefix) {
+			s = strings.TrimPrefix(s, groupPrefix) + "/"
+		}
+		if !strings.HasSuffix(s, "/") {
+			return "", false
+		}
+		name := strings.TrimSuffix(s, "/")
+		return name, name != "" && !strings.Contains(name, "/")
+	}
+	f, okFrom := isGroup(from)
+	t, okTo := isGroup(to)
+	return f, t, okFrom && okTo
+}
+
+// groupMembers returns the indexes of the entries under namespace.
+func groupMembers(v vault, namespace string) []int {
+	var members []int
+	for i, item := range v.Secrets {
+		if strings.HasPrefix(item.Name, namespace+"/") {
+			members = append(members, i)
+		}
+	}
+	return members
 }
 func resolve(args []string) error {
 	if len(args) < 1 {

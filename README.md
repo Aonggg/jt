@@ -70,6 +70,7 @@ jt sync
 | `jt resolve <name-or-ref> [--env NAME] --exec CMD [ARGS...]` | 解密后以环境变量（默认 `JT_SECRET`）运行命令 |
 | `jt env <namespace> -- CMD [ARGS...]` | `namespace/VAR` 下所有条目变成子进程的环境变量 `VAR`；也接受组引用 `jt://env/<namespace>` |
 | `jt describe` / `jt mv` / `jt rm` | 改描述 / 改名 / 删除 |
+| `jt mv <namespace>/ <new>/` / `jt rm <namespace>/` | 重命名整组（引用不变）/ 删除整组；结尾的 `/` 是必需的 |
 | `jt key export` / `jt key import [KEY]` | 主密钥经剪贴板在机器之间搬运 |
 | `jt sync` / `jt status [--json]` | 拉取、提交、推送 vault / 查看本地是否有未同步改动 |
 
@@ -105,6 +106,7 @@ jt resolve cf/CLOUDFLARE_API_TOKEN --exec powershell -NoProfile -Command "curl.e
 
 - 顶部搜索框直接打字过滤名称 / 描述 / ID（输入法在这个框里是关的，粘贴中文照样能搜）；↑↓ 选行，**Enter 复制引用并收起面板**，然后去 AI 对话里粘贴。
 - 列表按命名空间分组显示，组头写着整组引用 `jt://env/cf` 和注入命令。**点组头选中整组**（右键组头直接出整组菜单，双击组头复制整组并收起面板）；Ctrl/Shift 多选几行再按 Enter，就复制选中的那几条。工具栏：抓取剪贴板、新建（手动输入，值用密码框）、复制引用（Enter）、复制整组（Ctrl+Enter）、复制明文（不进剪贴板历史）、改名（F2）、描述、查看/更新值、删除（选中多条就删多条）、同步、刷新（F5）。右键行也有这些。
+- 组的管理：组就是命名空间，有一条就存在，一条不剩就消失。工具栏"新建组…"输入组名并存入第一条；右键组头 → "重命名组…"（组里每条改成 `新名/原名`，`jt://secret/…` 引用全部不变，只有 `jt://env/旧名` 变成新名）或"删除整组…"；选中整组后按 F2 也是重命名组。命令行对应 `jt mv cf/ cloudflare/` 和 `jt rm cf/`——必须带结尾的 `/`，防止把整组误当成一条。往已有组里加条目就是普通的新建/抓取，名称写成 `组名/NAME`。
 - 查看/更新值：对话框里直接显示当前值（默认遮住，勾"显示"看明文；多行的值直接显示），改完确定就更新，引用不变。GUI 拿到这个值的方式和 Agent 一样——`jt resolve <引用> --exec jt-gui.exe --print-env JT_SECRET`，由子进程把环境变量写回来；`jt` 本身仍然不打印任何真值。
 - 状态栏显示条数和同步状态；同步失败会弹出 git 的原话。
 - 托盘菜单：显示 / 隐藏、抓取剪贴板、同步、开机自动启动到托盘、退出。关窗口只是收到托盘。
