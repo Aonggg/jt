@@ -879,6 +879,10 @@ func initVault(args []string) error {
 	} else if repo != "" {
 		_ = runGit(c.Vault, "remote", "set-url", "origin", repo)
 	}
+	// vault.json is written with LF on every platform; never let autocrlf rewrite or warn about it.
+	if err := runGit(c.Vault, "config", "core.autocrlf", "false"); err != nil {
+		return err
+	}
 	if _, err := os.Stat(filepath.Join(c.Vault, "vault.json")); errors.Is(err, os.ErrNotExist) {
 		if err := saveVault(c, vault{Version: 1, Secrets: []entry{}}); err != nil {
 			return err
@@ -963,7 +967,13 @@ func syncVault(args []string) error {
 	}
 	status := exec.Command("git", "-C", c.Vault, "diff", "--cached", "--quiet")
 	if err := status.Run(); err != nil {
-		if err := runGit(c.Vault, "commit", "-m", "Update encrypted secrets"); err != nil {
+		commit := []string{"commit", "-m", "Update encrypted secrets"}
+		// The author of an encrypted vault commit carries no information; do not
+		// make a fresh machine fail until git has a global identity.
+		if _, err := gitOutput(c.Vault, "config", "user.email"); err != nil {
+			commit = append([]string{"-c", "user.name=jt", "-c", "user.email=jt@localhost"}, commit...)
+		}
+		if err := runGit(c.Vault, commit...); err != nil {
 			return err
 		}
 	}

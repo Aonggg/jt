@@ -158,14 +158,11 @@ func TestStatusDirtyAndAhead(t *testing.T) {
 
 // A second machine bootstraps with `jt init --repo URL; jt sync` while the
 // remote already holds a vault, and the first machine can sync repeatedly
-// without configuring an upstream by hand.
+// without configuring an upstream or a git identity by hand.
 func TestInitClonesExistingRemoteAndSyncRepeats(t *testing.T) {
-	for _, k := range []string{"GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"} {
-		t.Setenv(k, "t")
-	}
-	for _, k := range []string{"GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"} {
-		t.Setenv(k, "t@t")
-	}
+	// No global or system git config: a fresh machine has no user.name/user.email.
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "absent"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	remote := t.TempDir()
 	git(t, remote, "init", "--bare")
 	dir, out := setup(t, []entry{{ID: "Abcd1234", Name: "app/KEY", Ciphertext: "opaque", Preview: "***"}})
@@ -179,6 +176,12 @@ func TestInitClonesExistingRemoteAndSyncRepeats(t *testing.T) {
 	}
 	if st := readStatus(t, out); st.Dirty || st.Ahead == nil || *st.Ahead != 0 {
 		t.Fatalf("first machine after sync: %+v", st)
+	}
+	if author, err := gitOutput(dir, "log", "-1", "--format=%an <%ae>"); err != nil || author != "jt <jt@localhost>" {
+		t.Fatalf("commit without a configured identity should use the jt fallback, got %q (%v)", author, err)
+	}
+	if crlf, err := gitOutput(dir, "config", "core.autocrlf"); err != nil || crlf != "false" {
+		t.Fatalf("vault repo should pin core.autocrlf=false, got %q (%v)", crlf, err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "vault.json"), []byte(`{"version":1,"secrets":[]}`), 0600); err != nil {
 		t.Fatal(err)

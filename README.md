@@ -2,7 +2,7 @@
 
 `jt` 是一个单文件命令行工具：把 API Token、密码这类密钥 AES-GCM 加密后存在本机 vault 里，交给 AI 的只是一个引用 `jt://secret/<id>`。AI 需要用密钥时运行 `jt resolve <引用> --exec <命令>` 或 `jt env <命名空间> -- <命令>`，真值只注入到那个子进程的环境变量，不打印、不进对话、不进日志。vault 是一个 Git 仓库，推到你自己的私有 GitHub 仓库就能在多台机器之间同步。
 
-这个版本只支持 Windows，源自 [catoncat/jt](https://github.com/catoncat/jt)（macOS / Linux），并把 [jiantieban](https://github.com/catoncat/jiantieban) 的"复制 → 标记为密钥 → 贴引用"流程做成了命令行：复制密钥，运行 `jt grab`，剪贴板里的明文就变成了引用。
+这个版本只支持 Windows，源自 [catoncat/jt](https://github.com/catoncat/jt)（macOS / Linux），并把 [jiantieban](https://github.com/catoncat/jiantieban) 的"复制 → 标记为密钥 → 贴引用"流程搬了过来：命令行 `jt grab`，以及一个托盘图形界面 `jt-gui.exe`（见下文）。
 
 ## 解决的问题
 
@@ -26,16 +26,16 @@ jt env cf -- wrangler whoami
 
 要求：Windows 10 或 11，[Git for Windows](https://git-scm.com/download/win)（同步用），Windows PowerShell（`--clear-history` 用）。
 
-从源码构建（需要 Go 1.26 或更高）：
+从源码构建（需要 Go 1.26 或更高；GUI 用 Windows 自带的 C# 编译器，不用装别的）：
 
 ```powershell
-go build -trimpath -ldflags '-s -w' -o bin\jt.exe .\cmd\jt
+.\build.ps1                                   # 产出 bin\jt.exe 和 bin\jt-gui.exe
 New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\Programs\jt" | Out-Null
-Copy-Item bin\jt.exe "$env:LOCALAPPDATA\Programs\jt\jt.exe"
-# 把 %LOCALAPPDATA%\Programs\jt 加入用户 PATH
+Copy-Item bin\jt.exe, bin\jt-gui.exe "$env:LOCALAPPDATA\Programs\jt\"
+# 把 %LOCALAPPDATA%\Programs\jt 加入用户 PATH；jt-gui.exe 可以固定到任务栏或开始菜单
 ```
 
-发布包：把这个仓库推到你自己的 GitHub 账号并打一个 `v*` 标签，release 工作流会在 Windows runner 上跑测试并产出 `jt-windows-amd64.zip` / `jt-windows-arm64.zip` 和 sha256。然后：
+发布包：把这个仓库推到你自己的 GitHub 账号并打一个 `v*` 标签，release 工作流会在 Windows runner 上跑测试并产出 `jt-windows-amd64.zip` / `jt-windows-arm64.zip`（各含 `jt.exe` 和 `jt-gui.exe`）和 sha256。然后：
 
 ```powershell
 $env:JT_REPO = '<you>/jt'
@@ -90,6 +90,19 @@ jt resolve cf/CLOUDFLARE_API_TOKEN --exec cmd /C "curl -s -H \"Authorization: Be
 jt resolve cf/CLOUDFLARE_API_TOKEN --exec powershell -NoProfile -Command "curl.exe -s -H \"Authorization: Bearer $env:JT_SECRET\" https://api.cloudflare.com/client/v4/user/tokens/verify"
 ```
 
+## 图形界面 jt-gui
+
+`jt-gui.exe` 是 jiantieban 密钥视图的 Windows 版：常驻托盘，**Ctrl+Shift+J** 呼出 / 收起面板，**Ctrl+Shift+G** 直接弹出"抓取剪贴板"。它只是 `jt` 的界面，所有操作都转成 `jt` 命令，自己不碰密钥文件；需要 `jt.exe` 在同一目录、`%LOCALAPPDATA%\Programs\jt`、PATH 或环境变量 `JT_BIN` 指向的位置。
+
+面板里：
+
+- 顶部搜索框直接打字过滤名称 / 描述 / ID（输入法在这个框里是关的，粘贴中文照样能搜）；↑↓ 选行，**Enter 复制引用并收起面板**，然后去 AI 对话里粘贴。
+- 工具栏：抓取剪贴板、新建（手动输入，值用密码框）、复制引用、复制明文（不进剪贴板历史）、改名（F2）、描述、更新值、删除、同步、刷新（F5）。右键行也有这些。
+- 状态栏显示条数和同步状态；同步失败会弹出 git 的原话。
+- 托盘菜单：显示 / 隐藏、抓取剪贴板、同步、开机自动启动到托盘、退出。关窗口只是收到托盘。
+
+没有剪贴板历史管理——Windows 自己有 Win+V。
+
 ## 给 AI 用
 
 1. 把 `skills/jt-secret/` 复制到你所用 Agent 的 skills 目录。Claude Code：`%USERPROFILE%\.claude\skills\jt-secret\SKILL.md`（项目级放 `.claude\skills\`）。
@@ -121,10 +134,10 @@ jt resolve cf/CLOUDFLARE_API_TOKEN --exec powershell -NoProfile -Command "curl.e
 ```powershell
 go vet ./...
 go test ./...
-go build -o bin\jt.exe .\cmd\jt
+.\build.ps1          # bin\jt.exe（Go）+ bin\jt-gui.exe（C#，用 Windows 自带的 csc 编译）
 ```
 
-测试使用临时目录、假剪贴板和本地 bare 仓库，不碰你的真实 vault 和剪贴板。推送 `v*` 标签会触发 release 工作流，产出 `jt-windows-amd64.zip` / `jt-windows-arm64.zip` 和 sha256。
+`gui\` 是 C# 5 代码：Windows 自带的 .NET Framework 编译器只认到这个版本，所以没有字符串插值、`?.` 之类的语法。图标用 `gui\make-icon.ps1` 重新生成。测试使用临时目录、假剪贴板和本地 bare 仓库，不碰你的真实 vault 和剪贴板。推送 `v*` 标签会触发 release 工作流，产出 `jt-windows-amd64.zip` / `jt-windows-arm64.zip`（各含两个 exe）和 sha256。
 
 ## License
 

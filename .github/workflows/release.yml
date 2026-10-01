@@ -25,16 +25,23 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Build
+      - name: Build jt.exe
         env:
           GOOS: windows
           GOARCH: ${{ matrix.goarch }}
         run: go build -trimpath -ldflags '-s -w' -o jt.exe ./cmd/jt
+      - name: Build jt-gui.exe
+        shell: pwsh
+        # The .NET Framework compiler on the runner; the AnyCPU assembly runs on both architectures.
+        run: |
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          & $csc /nologo /target:winexe /optimize+ /platform:anycpu /warnaserror+ /out:jt-gui.exe /win32icon:gui\jt.ico /win32manifest:gui\app.manifest /r:System.Web.Extensions.dll (Get-ChildItem gui\*.cs | ForEach-Object FullName)
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Package
         shell: pwsh
         run: |
           $asset = "jt-windows-${{ matrix.goarch }}.zip"
-          Compress-Archive -Path jt.exe -DestinationPath $asset
+          Compress-Archive -Path jt.exe, jt-gui.exe -DestinationPath $asset
           $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
           "$hash  $asset" | Set-Content -NoNewline "$asset.sha256"
       - uses: softprops/action-gh-release@v2
